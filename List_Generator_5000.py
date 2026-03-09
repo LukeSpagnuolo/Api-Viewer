@@ -1,0 +1,1236 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Nov 10 09:54:02 2025
+
+List generator 5000
+
+@author: lukespagnuolo
+"""
+
+# app.py – Export ALL Profiles (universal JSON flattening, with campus-by-city mapping)
+# ------------------------------------------------------------------------
+CLIENT_ID = "VbcO9bGovprC5YOOFeMJfkLcvNDuANDbATdqDicn"
+CLIENT_SECRET = "WEQzHzSfM10pQOMbdCyVWBRpvwyGyOBnvEUyEm4vkZCMnj6CoG5KgMNk144OtKBB0ZGzwSzx0cQcJzcis6uP9XYD9OiC2VD8yneZM7pmklCQoV8dJbwSKW6Htv7xmnun"
+
+SITE = "https://apps.csipacific.ca"
+
+import os
+
+def running_in_spyder() -> bool:
+    """Detect Spyder/IPython console execution to avoid dev-server reloader issues."""
+    if "SPYDER_ARGS" in os.environ:
+        return True
+    return any(k.startswith("SPYDER") for k in os.environ)
+
+if os.getenv("APP_URL"):
+    APP_URL = os.getenv("APP_URL")
+elif os.getenv("CODESPACE_NAME") and os.getenv("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN"):
+    APP_URL = (
+        f"https://{os.getenv('CODESPACE_NAME')}-8050."
+        f"{os.getenv('GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN')}"
+    )
+else:
+    APP_URL = "http://127.0.0.1:8050"
+
+AUTH_URL = f"{SITE}/o/authorize"
+TOKEN_URL = f"{SITE}/o/token/"
+PROFILES_URL = f"{SITE}/api/registration/report-rows/"
+REPORT_COLUMNS_URL = f"{SITE}/api/registration/report-columns/"
+
+# -------------------------------------------------------------------------
+# Networking & retry tuning (UPDATED)
+# -------------------------------------------------------------------------
+PAGE_LIMIT = 50              # smaller pages reduce risk of slow responses timing out
+MAX_RETRIES = 5              # include retries for timeouts/conn errors too
+BACKOFF_SEC = 1.5            # base backoff; we also add jitter
+REQUEST_TIMEOUT = (10, 90)   # (connect timeout, read timeout) in seconds
+RETRYABLE_STATUSES = (502, 503, 504, 524)  # include common gateway/timeouts
+
+# -------------------------------------------------------------------------
+# CAMPUS OPTIONS (corrected)
+# -------------------------------------------------------------------------
+CAMPUS_OPTS = [
+    {"label": "CSI Pacific - Victoria",           "value": 1},
+    {"label": "CSI Pacific - Vancouver",          "value": 2},
+    {"label": "CSI Pacific - Whistler",           "value": 3},
+    {"label": "Engage Sport North",               "value": 4},
+    {"label": "Pacific Sport - Columbia Basin",   "value": 5},
+    {"label": "Pacific Sport - Fraser Valley",    "value": 6},
+    {"label": "Pacific Sport - Interior",         "value": 7},
+    {"label": "Pacific Sport - Okanagan",         "value": 8},
+    {"label": "Pacific Sport - Vancouver Island", "value": 9},
+    {"label": "Other",                            "value": 10},
+    {"label": "Unsure",                           "value": 11},
+    {"label": "Not Applicable",                   "value": 12},
+    {"label": "All Campuses",                     "value": "all"},
+]
+CAMPUS_LABEL_MAP = {
+    opt["value"]: opt["label"]
+    for opt in CAMPUS_OPTS
+    if isinstance(opt["value"], int)
+}
+
+# -------------------------------------------------------------------------
+# ROLE OPTIONS
+# -------------------------------------------------------------------------
+ROLE_OPTS = [
+    {"label": "(all roles)", "value": ""},
+    {"label": "Athlete", "value": "athlete"},
+    {"label": "Coach", "value": "coach"},
+    {"label": "Staff", "value": "staff"},
+]
+ROLE_ID_MAP = {"athlete": 1, "coach": 2, "staff": 4}
+
+
+
+# -------------------------------------------------------------------------
+# IMPORTS & APP INITIALISATION
+# -------------------------------------------------------------------------
+import json, time, requests, pandas as pd, random, math
+from requests.exceptions import ReadTimeout, ConnectTimeout, ConnectionError
+from dash_auth_external import DashAuthExternal
+from dash import Dash, html, dcc, dash_table, Input, Output, State, no_update
+
+auth = DashAuthExternal(
+    AUTH_URL, TOKEN_URL,
+    app_url=APP_URL,
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET
+)
+server = auth.server
+app = Dash(__name__, server=server)
+
+# -------------------------------------------------------------------------
+# SAFE STRING + UNIVERSAL FLATTENING
+
+# -------------------------------------------------------------------------
+# SAFE STRING + UNIVERSAL FLATTENING
+# -------------------------------------------------------------------------
+
+def safe_str(v):
+    """Convert any complex or None values to a safe string for DataTable/CSV."""
+    if v is None:
+        return ""
+    if isinstance(v, (str, int, float, bool)):
+        return str(v)
+    try:
+        return json.dumps(v, ensure_ascii=False)
+    except Exception:
+        return str(v)
+
+def flatten_json(data, prefix=""):
+    """Recursively flatten dicts/lists with dot notation, handling all types."""
+    out = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            new_key = f"{prefix}{k}" if prefix == "" else f"{prefix}.{k}"
+            out.update(flatten_json(v, new_key))
+    elif isinstance(data, list):
+        out[prefix] = "; ".join([safe_str(i) for i in data])
+    else:
+        out[prefix] = safe_str(data)
+    return out
+
+def _normalize_report_value(raw, col_def):
+    """Normalize report values using column metadata (labels/options/multiselect)."""
+    if raw is None:
+        return ""
+
+    options = col_def.get("options") or []
+    opt_map = {str(o.get("value")): o.get("label", safe_str(o.get("value"))) for o in options}
+    is_multiselect = bool(col_def.get("is_multiselect"))
+
+    if options:
+        if is_multiselect:
+            vals = raw if isinstance(raw, list) else [raw]
+            labels = [opt_map.get(str(v), safe_str(v)) for v in vals if v not in (None, "")]
+            return "; ".join(labels)
+        return opt_map.get(str(raw), safe_str(raw))
+
+    if isinstance(raw, list):
+        return "; ".join([safe_str(i) for i in raw])
+
+    return safe_str(raw)
+
+def flatten_report_row(row: dict, campus_id, report_columns: list) -> dict:
+    """
+    Flatten new report-format rows using the provided column metadata.
+    Supports values stored in row["cells"] and row["meta"].
+    """
+    flat = {}
+    cells = row.get("cells") if isinstance(row.get("cells"), dict) else {}
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+
+    for col in report_columns:
+        key = col.get("key")
+        if not key:
+            continue
+
+        target = col.get("target")
+        if target == "cells":
+            raw = cells.get(key)
+        elif target == "meta":
+            raw = meta.get(key)
+        else:
+            raw = row.get(key)
+
+        # Fallback lookups for inconsistent payloads
+        if raw is None and key in row:
+            raw = row.get(key)
+        if raw is None and key in cells:
+            raw = cells.get(key)
+        if raw is None and key in meta:
+            raw = meta.get(key)
+
+        flat[key] = _normalize_report_value(raw, col)
+
+    # Include unmapped scalar keys to retain visibility of extra data
+    for k, v in row.items():
+        if k in ("cells", "meta") or k in flat:
+            continue
+        if isinstance(v, (dict, list)):
+            continue
+        flat[k] = safe_str(v)
+
+    # Keep existing campus fields used elsewhere in the app
+    if isinstance(campus_id, int) and campus_id in CAMPUS_LABEL_MAP:
+        flat["campus_id"] = str(campus_id)
+        flat["campus_label"] = CAMPUS_LABEL_MAP.get(campus_id, "")
+    else:
+        flat["campus_id"] = ""
+        flat["campus_label"] = "All Campuses"
+
+    return flat
+
+def flatten_profile(p, campus_id):
+    """
+    Fully flatten profile including all nested content + campus/carding mapping,
+    and add campus_by_birth / current_campus using the city → campus mapping.
+    """
+    flat = flatten_json(p)
+
+    # API / nomination campus from profile
+    flat["campus_id"] = str(campus_id)
+    flat["campus_label"] = CAMPUS_LABEL_MAP.get(
+        campus_id, f"Unknown ({campus_id})"
+    )
+
+    return flat
+
+# -------------------------------------------------------------------------
+# FETCH PAGINATED RESULTS (UPDATED with robust retries)
+# -------------------------------------------------------------------------
+def fetch_paginated(url, headers, log):
+    """
+    Fetch paginated DRF endpoint with robust retries for:
+      - HTTP 502/503/504/524
+      - ReadTimeout / ConnectTimeout / ConnectionError
+    Uses exponential backoff with jitter, smaller page size, and longer read timeout.
+    """
+    rows, page = [], 0
+    report_meta = {"columns": [], "defaults": [], "system": []}
+    session = requests.Session()
+
+    while url:
+        # ensure limit is set
+        if "limit=" not in url:
+            url += ("&" if "?" in url else "?") + f"limit={PAGE_LIMIT}"
+
+        page += 1
+        retries, wait = 0, BACKOFF_SEC
+
+        while True:
+            try:
+                resp = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+                status = resp.status_code
+
+                # Retry on retryable HTTP statuses
+                if status in RETRYABLE_STATUSES and retries < MAX_RETRIES:
+                    log.append(f"[{page}] {url} • {status} → retry {retries+1}/{MAX_RETRIES} in {wait:.1f}s")
+                    time.sleep(wait + random.uniform(0, 0.5))  # jitter
+                    retries += 1
+                    wait *= 2
+                    continue
+
+                # Non-retryable HTTP error
+                if status != 200:
+                    log.append(f"[{page}] {url} • {status}\n{resp.text[:300]}")
+                    return rows, report_meta  # bail but keep what we have
+
+                # Success
+                log.append(f"[{page}] {url} • 200")
+                data = resp.json()
+
+                # New report format: {report: "report_rows", columns: [...], ...}
+                if isinstance(data, dict) and ("report" in data or "columns" in data):
+                    report_key = data.get("report") or "report_rows"
+                    page_rows = data.get(report_key)
+                    if not isinstance(page_rows, list):
+                        page_rows = data.get("report_rows", [])
+                    if isinstance(page_rows, list):
+                        rows.extend(page_rows)
+
+                    if isinstance(data.get("columns"), list):
+                        report_meta["columns"] = data.get("columns", [])
+                    if isinstance(data.get("defaults"), list):
+                        report_meta["defaults"] = data.get("defaults", [])
+                    if isinstance(data.get("system"), list):
+                        report_meta["system"] = data.get("system", [])
+
+                    # Some endpoints may still provide pagination links
+                    url = data.get("next")
+                    if not url:
+                        break
+                    continue
+
+                # Legacy DRF format
+                rows.extend(data.get("results", []))
+                url = data.get("next")
+                break  # proceed to next page if any
+
+            except (ReadTimeout, ConnectTimeout, ConnectionError) as e:
+                if retries < MAX_RETRIES:
+                    log.append(f"[{page}] timeout/conn error: {e.__class__.__name__} → retry {retries+1}/{MAX_RETRIES} in {wait:.1f}s")
+                    time.sleep(wait + random.uniform(0, 0.5))
+                    retries += 1
+                    wait *= 2
+                    continue
+                else:
+                    log.append(f"[{page}] giving up after {MAX_RETRIES} retries: {type(e).__name__}: {str(e)[:200]}")
+                    return rows, report_meta  # return what we managed to fetch so far
+
+            except Exception as e:
+                # Unexpected error; log and stop
+                log.append(f"[{page}] unexpected error: {type(e).__name__}: {str(e)[:200]}")
+                return rows, report_meta
+
+    return rows, report_meta
+
+def build_export_columns(df: pd.DataFrame, report_meta: dict) -> list:
+    """Build export fields/labels from API metadata; fallback to legacy defaults."""
+    if not df.empty and report_meta.get("columns"):
+        label_map = {
+            c.get("key"): c.get("label", c.get("key"))
+            for c in report_meta.get("columns", [])
+            if c.get("key")
+        }
+        defaults = [k for k in report_meta.get("defaults", []) if k in df.columns]
+        system = [k for k in report_meta.get("system", []) if k in df.columns and k not in defaults]
+
+        ordered = defaults + system
+        ordered += [k for k in df.columns if k not in ordered]
+
+        return [(k, label_map.get(k, k)) for k in ordered]
+
+    cols = [(field, label) for field, label in EXPORT_COLUMNS if field in df.columns]
+    extras = [(c, c) for c in df.columns if c not in {f for f, _ in cols}]
+    return cols + extras
+
+
+def fetch_column_defs(headers, log):
+    """Fetch available report column definitions from the API."""
+    try:
+        resp = requests.get(REPORT_COLUMNS_URL, headers=headers, timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                return data.get("results", data.get("columns", []))
+        log.append(f"report-columns: HTTP {resp.status_code}")
+    except Exception as e:
+        log.append(f"report-columns error: {e}")
+    return []
+
+
+# -------------------------------------------------------------------------
+# GLOBAL CACHE
+# -------------------------------------------------------------------------
+cached_df, cached_name = pd.DataFrame(), ""
+
+# -------------------------------------------------------------------------
+# EXPORT COLUMN SPECS (field name → pretty label)
+# -------------------------------------------------------------------------
+EXPORT_COLUMNS = [
+    ("role_slug",                          "role"),
+    ("person.first_name",                  "First Name"),
+    ("person.last_name",                   "Last Name"),
+    ("person.email",                       "Email"),
+    ("person.dob",                         "Birth Date"),
+    ("person.guardian.first_name",         "Guardian First Name"),
+    ("person.guardian.last_name",          "Guardian Last Name"),
+    ("person.guardian.relationship",       "Guardian Relationship"),
+    ("person.guardian.email",              "Guardian Email"),
+    ("sport.name",                         "Sport"),
+    ("current_enrollment.admin_status",    "Enrollment Status"),
+    ("current_nomination.organization.name","Nomination Organization"),
+    ("current_nomination.fiscal_year",     "Nomination Fiscal Year"),
+    ("current_nomination.end_date",        "Nomination End Date"),
+    ("current_nomination.sport.name",      "Nomination Sport Name"),
+    ("current_nomination.redeemed",        "Nomination Claimed"),
+    ("current_nomination.carding_level",   "Nomination Carding Level"),
+    ("level_category",                     "Level Category"),
+    ("residence_city.name",                "Current Residence"),
+    ("birth_city.name",                    "Birth City"),
+    ("discipline",                         "Discipline"),
+    ("sex_of_competition",                 "Sex of Competition"),
+    ("gender",                             "Gender"),
+    ("ethnicity",                          "Ethnicity"),
+    ("ethnicity_other",                    "Ethnicity Other"),
+    ("pronouns",                           "Pronouns"),
+    ("pronouns_other",                     "Pronouns Other"),
+    ("disability",                         "Disability"),
+    ("birth_country",                      "Birth Country"),
+    ("residence_country",                  "Residence Country"),
+    ("education_attending",                "Attending Education"),
+    ("education_level",                    "Education Level"),
+    ("education_institution",              "Education Institution"),
+    ("education_css",                      "CSS"),
+    ("campus_label",                       "Campus Preferred"),
+    ("birth_city_campus",                  "Campus by Birth"),
+    ("residence_city_campus",              "Current Campus"),
+    ("current_nomination.nccp_number",     "Nccp Number"),
+    ("current_nomination.coach_role",      "Coach Role"),
+    ("current_nomination.coach_level",     "Coach Level"),
+    ("major_games",                        "Major Games"),
+]
+
+# list of internal field names for filtering
+FILTER_COLUMNS = [field for field, _ in EXPORT_COLUMNS]
+
+FIELD_TO_LABEL = {field: label for field, label in EXPORT_COLUMNS}
+LABEL_TO_FIELD = {label: field for field, label in EXPORT_COLUMNS}
+
+# Dynamic export mapping refreshed on each successful fetch
+ACTIVE_EXPORT_COLUMNS = EXPORT_COLUMNS.copy()
+ACTIVE_FILTER_COLUMNS = FILTER_COLUMNS.copy()
+ACTIVE_FIELD_TO_LABEL = FIELD_TO_LABEL.copy()
+
+# -------------------------------------------------------------------------
+# TEST SPORTS TO EXCLUDE FROM FILTERED DOWNLOAD
+# -------------------------------------------------------------------------
+TEST_SPORTS = {
+    "Cinderball (TEST)",
+    "Skimboarding Cross (TEST)",
+}
+TEST_SPORTS_NORMALIZED = {s.strip().lower() for s in TEST_SPORTS}
+
+def remove_test_sports(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove rows where any of the sport columns indicate TEST sports.
+    Checks both internal and pretty column names, case-insensitive.
+    """
+    if df.empty:
+        return df
+
+    cols = [
+        c for c in [
+            "sport.name",
+            "current_nomination.sport.name",
+            "sport",
+            "Sport",
+            "Nomination Sport Name",
+        ]
+        if c in df.columns
+    ]
+    if not cols:
+        return df
+
+    mask = pd.Series(True, index=df.index)
+
+    for col in cols:
+        s = df[col].fillna("").astype(str).str.strip().str.lower()
+        explicit = s.isin(TEST_SPORTS_NORMALIZED)
+        contains_test = s.str.contains("(test", case=False, regex=False)
+        mask &= ~(explicit | contains_test)
+
+    return df[mask]
+
+# -------------------------------------------------------------------------
+# ADD LEVEL CATEGORY COLUMN
+# -------------------------------------------------------------------------
+def add_level_category(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add a 'level_category' column derived from the athlete_carding column.
+
+    Rules:
+      - Prov Dev 1/2/3 → 'Provincial Development'
+      - NSO Affiliated (Uncarded) → 'Canadian Development'
+      - SR, SR1, D, C1, etc. → 'Canadian Elite'
+      - PSO Affiliated (Uncarded) → 'PSO Affiliated (Non Carded)'
+    """
+    carding_col = "athlete_carding"
+
+    if carding_col not in df.columns:
+        df["level_category"] = ""
+        return df
+
+    s = df[carding_col].fillna("").astype(str).str.strip()
+
+    cat = pd.Series("", index=df.index, dtype="object")
+
+    prov_dev_vals = {"Prov Dev 1", "Prov Dev 2", "Prov Dev 3"}
+    cat[s.isin(prov_dev_vals)] = "Provincial Development"
+
+    cat[s.str.contains("NSO Affiliated", case=False, na=False)] = "Canadian Development"
+
+    cat[s.str.contains("PSO Affiliated", case=False, na=False)] = "PSO Affiliated (Non Carded)"
+
+    elite_vals = {"SR", "SRI", "SR1", "SR2", "D", "DI", "C", "C1", "C1I", "GamePlan - Retired"}
+    cat[s.isin(elite_vals)] = "Canadian Elite"
+
+    df["level_category"] = cat
+    return df
+
+# -------------------------------------------------------------------------
+# CAMPUS FILTER HELPER
+# -------------------------------------------------------------------------
+def apply_campus_filters(df, campus_val, birth_campus_val, current_campus_val):
+    """
+    Apply three campus-based filters to a DataFrame:
+      - campus_val          → filters by API campus (campus_label column)
+      - birth_campus_val    → filters by mapped birth campus (campus_by_birth)
+      - current_campus_val  → filters by mapped current campus (current_campus)
+    Empty/None values mean "no filter" for that dimension.
+    """
+    out = df
+
+    # Filter by API campus / campus_label (using campus id)
+    if isinstance(campus_val, int) and "campus_label" in out.columns:
+        label = CAMPUS_LABEL_MAP.get(campus_val)
+        if label:
+            out = out[out["campus_label"] == label]
+
+    # Filter by birth city campus (direct API column)
+    if birth_campus_val and "birth_city_campus" in out.columns:
+        out = out[out["birth_city_campus"] == birth_campus_val]
+
+    # Filter by residence city campus (direct API column)
+    if current_campus_val and "residence_city_campus" in out.columns:
+        out = out[out["residence_city_campus"] == current_campus_val]
+
+    return out
+
+# -------------------------------------------------------------------------
+# LAYOUT
+# -------------------------------------------------------------------------
+app.layout = html.Div(
+    style={"fontFamily": "Arial", "margin": "2rem"},
+    children=[
+        # Title & subtitle
+        html.H1(
+            "List Generator 5000",
+            style={
+                "marginBottom": "0.1rem",
+                "fontSize": "2rem",
+                "color": "#003366",
+            },
+        ),
+        html.Div(
+            "Campus filter options",
+            style={
+                "marginBottom": "1rem",
+                "fontSize": "0.95rem",
+                "color": "#555555",
+            },
+        ),
+
+        # Campus + role filters + Fetch button
+        html.Div(
+            [
+                dcc.Dropdown(
+                    id="campus-dd",
+                    options=CAMPUS_OPTS,
+                    value="all",
+                    placeholder="Filter: API campus (campus_label)",
+                    style={"width": "260px"},
+                ),
+                dcc.Dropdown(
+                    id="birth-campus-dd",
+                    options=[{"label": "(all birth campuses)", "value": ""}],
+                    value="",
+                    placeholder="Filter: birth city campus (fetch rows first)",
+                    style={"width": "260px", "marginLeft": "0.6rem"},
+                ),
+                dcc.Dropdown(
+                    id="current-campus-dd",
+                    options=[{"label": "(all current campuses)", "value": ""}],
+                    value="",
+                    placeholder="Filter: residence campus (fetch rows first)",
+                    style={"width": "260px", "marginLeft": "0.6rem"},
+                ),
+                dcc.Dropdown(
+                    id="role-dd",
+                    options=ROLE_OPTS,
+                    value="",
+                    placeholder="Filter: role",
+                    style={"width": "160px", "marginLeft": "0.6rem"},
+                ),
+            ],
+            style={
+                "display": "flex",
+                "alignItems": "center",
+                "flexWrap": "wrap",
+                "marginBottom": "1rem",
+            },
+        ),
+
+        # Fetch Columns button + column selector + Fetch Rows button
+        html.Div(
+            [
+                html.Button(
+                    "Fetch Columns",
+                    id="btn-fetch-columns",
+                    style={
+                        "padding": "0.45rem 1.2rem",
+                        "height": "40px",
+                        "whiteSpace": "nowrap",
+                    },
+                ),
+                dcc.Dropdown(
+                    id="fetch-columns-select",
+                    options=[],
+                    value=[],
+                    multi=True,
+                    placeholder="Click ‘Fetch Columns’ first, then choose which columns to include…",
+                    style={"flex": "1", "minWidth": "200px", "marginLeft": "0.6rem", "marginRight": "0.6rem"},
+                ),
+                html.Button(
+                    "Fetch Rows",
+                    id="btn-fetch-rows",
+                    style={
+                        "padding": "0.45rem 1.2rem",
+                        "height": "40px",
+                        "whiteSpace": "nowrap",
+                        "backgroundColor": "#0072B2",
+                        "color": "white",
+                        "border": "none",
+                        "cursor": "pointer",
+                    },
+                ),
+            ],
+            style={
+                "display": "flex",
+                "alignItems": "center",
+                "flexWrap": "wrap",
+                "marginBottom": "0.3rem",
+            },
+        ),
+        html.Div(
+            id="col-fetch-status",
+            style={"marginBottom": "1rem", "fontSize": "0.85rem", "color": "#555"},
+        ),
+
+        # Data preview section (loading + main preview table)
+        dcc.Loading(
+            id="loading-spinner",
+            type="circle",
+            color="#0072B2",
+            fullscreen=True,
+            children=[
+                html.Div(
+                    id="loading-message",
+                    style={
+                        "textAlign": "center",
+                        "fontWeight": "bold",
+                        "color": "#0072B2",
+                        "marginTop": "0.5rem",
+                        "fontSize": "1rem",
+                    },
+                ),
+                dash_table.DataTable(
+                    id="preview",
+                    page_size=10,   # 10 rows per page for fetched profiles
+                    style_table={
+                        "overflowX": "auto",
+                        "marginTop": "0.8rem",
+                        "width": "100%",
+                    },
+                    style_header={
+                        "backgroundColor": "#0072B2",
+                        "color": "white",
+                        "fontWeight": "bold",
+                    },
+                    style_cell={
+                        "textAlign": "left",
+                        "fontSize": "0.8rem",
+                        "padding": "5px",
+                    },
+                    style_data_conditional=[
+                        {
+                            "if": {"row_index": "odd"},
+                            "backgroundColor": "#f9f9f9",
+                        }
+                    ],
+                ),
+            ],
+        ),
+
+        # Download options section
+        html.Hr(style={"marginTop": "1.8rem", "marginBottom": "1rem"}),
+        html.H3(
+            "Download options",
+            style={
+                "marginBottom": "0.4rem",
+                "fontSize": "1.2rem",
+                "color": "#003366",
+            },
+        ),
+
+        # Filtered CSV preview
+        html.Div(
+            "Filtered CSV preview (first 10 rows)",
+            style={
+                "marginBottom": "0.4rem",
+                "fontSize": "0.9rem",
+                "color": "#555555",
+            },
+        ),
+        dash_table.DataTable(
+            id="filtered-preview",
+            page_size=10,   # 10 rows per page for filtered preview
+            style_table={
+                "overflowX": "auto",
+                "marginBottom": "0.8rem",
+                "width": "100%",
+            },
+            style_header={
+                "backgroundColor": "#444444",
+                "color": "white",
+                "fontWeight": "bold",
+            },
+            style_cell={
+                "textAlign": "left",
+                "fontSize": "0.8rem",
+                "padding": "5px",
+            },
+            style_data_conditional=[
+                {
+                    "if": {"row_index": "odd"},
+                    "backgroundColor": "#f9f9f9",
+                }
+            ],
+        ),
+
+        # Download buttons
+        html.Div(
+            [
+                html.Button(
+                    "Download CSV (full)",
+                    id="btn-dl",
+                    n_clicks=0,
+                    disabled=True,
+                    style={
+                        "padding": "0.45rem 1.2rem",
+                        "marginRight": "0.8rem",
+                    },
+                ),
+                html.Button(
+                    "Download Filtered CSV",
+                    id="btn-dl-filter",
+                    n_clicks=0,
+                    disabled=True,
+                    style={
+                        "padding": "0.45rem 1.2rem",
+                        "backgroundColor": "#e0e0e0",
+                    },
+                ),
+            ],
+            style={
+                "display": "flex",
+                "alignItems": "center",
+                "flexWrap": "wrap",
+                "marginBottom": "0.7rem",
+            },
+        ),
+
+        # Column multiselect for filtered CSV (full width)
+        html.Div(
+            [
+                dcc.Dropdown(
+                    id="column-select",
+                    options=[
+                        {"label": label, "value": field}
+                        for field, label in EXPORT_COLUMNS
+                    ],
+                    value=[field for field, _ in EXPORT_COLUMNS],  # default: all
+                    multi=True,
+                    placeholder="Select columns for filtered CSV",
+                    style={"width": "100%"},
+                )
+            ],
+            style={"marginBottom": "0.6rem"},
+        ),
+
+        # Enrollment status filter for filtered CSV
+        html.Div(
+            [
+                dcc.Dropdown(
+                    id="enrollment-status-dd",
+                    options=[],  # populated after fetch
+                    value=[],
+                    multi=True,
+                    placeholder="Filter by enrollment status for filtered CSV (optional)",
+                    style={"width": "100%"},
+                )
+            ],
+            style={"marginBottom": "0.6rem"},
+        ),
+
+        # Nomination claimed filter for filtered CSV
+        html.Div(
+            [
+                dcc.Dropdown(
+                    id="nomination-claimed-dd",
+                    options=[],  # populated after fetch
+                    value=[],
+                    multi=True,
+                    placeholder="Filter by nomination claimed for filtered CSV (optional)",
+                    style={"width": "100%"},
+                )
+            ],
+            style={"marginBottom": "0.8rem"},
+        ),
+
+        # Collapsible technical log at the very bottom
+        html.Details(
+            [
+                html.Summary(
+                    "Technical request log (advanced)",
+                    style={
+                        "cursor": "pointer",
+                        "fontSize": "0.9rem",
+                        "color": "#555",
+                        "fontWeight": "bold",
+                    },
+                ),
+                html.Pre(
+                    id="log",
+                    style={
+                        "whiteSpace": "pre-wrap",
+                        "background": "#f7f7f7",
+                        "height": "25vh",
+                        "overflow": "auto",
+                        "padding": "0.7rem",
+                        "fontSize": "0.8rem",
+                        "border": "1px solid #ddd",
+                        "marginTop": "0.8rem",
+                    },
+                ),
+            ],
+            open=False,
+            style={"marginTop": "1.0rem"},
+        ),
+
+        dcc.Store(id="col-defs-store", data=[]),
+        dcc.Download(id="csv-file"),
+        dcc.Download(id="csv-file-filtered"),
+    ],
+)
+
+# -------------------------------------------------------------------------
+# CALLBACKS
+# -------------------------------------------------------------------------
+@app.callback(
+    Output("col-defs-store", "data"),
+    Output("fetch-columns-select", "options"),
+    Output("fetch-columns-select", "value"),
+    Output("col-fetch-status", "children"),
+    Input("btn-fetch-columns", "n_clicks"),
+    prevent_initial_call=True,
+)
+def fetch_columns_callback(_):
+    token = auth.get_token()
+    if not token:
+        return [], [], [], "No OAuth token – log in."
+    headers = {"Authorization": f"Bearer {token}"}
+    log = []
+    col_defs = fetch_column_defs(headers, log)
+    options = [
+        {"label": c.get("label", c.get("key", "")), "value": c.get("key", "")}
+        for c in col_defs
+        if c.get("key")
+    ]
+    values = [o["value"] for o in options]
+    if options:
+        status = f"Loaded {len(options)} column(s). Select which to include, then click Fetch Rows."
+    else:
+        reason = "; ".join(log) if log else "unknown error"
+        status = f"Failed to load columns: {reason}"
+    return col_defs, options, values, status
+
+
+@app.callback(
+    Output("preview", "data"),
+    Output("preview", "columns"),
+    Output("btn-dl", "disabled"),
+    Output("btn-dl-filter", "disabled"),
+    Output("log", "children"),
+    Output("loading-message", "children"),
+    Output("enrollment-status-dd", "options"),
+    Output("enrollment-status-dd", "value"),
+    Output("nomination-claimed-dd", "options"),
+    Output("nomination-claimed-dd", "value"),
+    Output("column-select", "options"),
+    Output("column-select", "value"),
+    Output("birth-campus-dd", "options"),
+    Output("birth-campus-dd", "value"),
+    Output("current-campus-dd", "options"),
+    Output("current-campus-dd", "value"),
+    Input("btn-fetch-rows", "n_clicks"),
+    State("campus-dd", "value"),
+    State("birth-campus-dd", "value"),
+    State("current-campus-dd", "value"),
+    State("role-dd", "value"),
+    State("fetch-columns-select", "value"),
+    State("col-defs-store", "data"),
+    prevent_initial_call=True,
+)
+def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val, fetch_col_val, col_defs_data):
+    token = auth.get_token()
+    if not token:
+        return (
+            no_update,
+            no_update,
+            True,
+            True,
+            "No OAuth token – log in.",
+            "",
+            [],
+            [],
+            [],
+            [],
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+        )
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    rows_total, flattened, log_lines = [], [], []
+
+    # Use col_defs from the store (populated by Fetch Columns button)
+    col_defs = col_defs_data or []
+
+    # Build report_meta from col_defs so flatten_report_row has column metadata
+    report_meta = {
+        "columns": col_defs,
+        "defaults": [],
+        "system": [],
+    }
+
+    # Use user-selected columns if any; otherwise use all from store
+    if fetch_col_val:
+        selected_keys = [k for k in fetch_col_val if k]
+    else:
+        selected_keys = [c.get("key") for c in col_defs if c.get("key")]
+
+    # Build the fetch URL with the ?columns= query param
+    fetch_url = PROFILES_URL
+    if selected_keys:
+        fetch_url += "?columns=" + ",".join(selected_keys)
+
+    if role_val:
+        log_lines.append("Role filter is currently ignored for report-rows endpoint.")
+    log_lines.append(f"\nPulling report rows: {len(selected_keys)} column(s) requested")
+
+    batch, batch_meta = fetch_paginated(fetch_url, headers, log_lines)
+    if batch_meta.get("columns"):
+        report_meta["columns"] = batch_meta["columns"]
+
+    for r in batch:
+        # report-rows payloads store values in row['cells'] and row['meta'].
+        if isinstance(r.get("cells"), dict) or isinstance(r.get("meta"), dict) or report_meta.get("columns"):
+            flattened.append(flatten_report_row(r, None, report_meta.get("columns", [])))
+        else:
+            # Fallback for legacy profile payloads
+            flattened.append(flatten_profile(r, 0))
+        rows_total.append(r)
+
+    log_lines.append(f"  added {len(batch)} rows")
+
+    if not flattened:
+        return (
+            [],
+            [],
+            True,
+            True,
+            "\n".join(log_lines),
+            "No profiles found.",
+            [],
+            [],
+            [],
+            [],
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+        )
+
+    df = pd.DataFrame(flattened)
+
+    df = add_level_category(df)
+
+    global cached_df, cached_name
+    global ACTIVE_EXPORT_COLUMNS, ACTIVE_FILTER_COLUMNS, ACTIVE_FIELD_TO_LABEL
+    cached_df = df.copy()
+    ACTIVE_EXPORT_COLUMNS = build_export_columns(df, report_meta)
+    ACTIVE_FILTER_COLUMNS = [field for field, _ in ACTIVE_EXPORT_COLUMNS]
+    ACTIVE_FIELD_TO_LABEL = {field: label for field, label in ACTIVE_EXPORT_COLUMNS}
+    campus_tag = "all"  # we always fetch all campuses now
+    cached_name = f"profiles_{campus_tag}{'_'+role_val if role_val else ''}.csv"
+
+    # Apply the three campus filters for the preview
+    df_view = apply_campus_filters(
+        df, campus_val, birth_campus_val, current_campus_val
+    )
+
+    columns = [{"name": ACTIVE_FIELD_TO_LABEL.get(c, c), "id": c} for c in df_view.columns]
+    loading_msg = f"Fetched {len(df_view)} profiles (from {len(df)} total)."
+
+    # Build enrollment status options from the full cached df (not filtered)
+    enrollment_options = []
+    enrollment_col = next(
+        (c for c in ["enrollment_status", "current_enrollment.admin_status"] if c in df.columns),
+        None,
+    )
+    if enrollment_col:
+        vals = (
+            df[enrollment_col]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        vals = sorted(vals)
+        enrollment_options = [{"label": v, "value": v} for v in vals]
+
+    # Build nomination claimed options from the full cached df
+    nomination_options = []
+    nomination_col = next(
+        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df.columns),
+        None,
+    )
+    if nomination_col:
+        nvals = (
+            df[nomination_col]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        nvals = sorted(nvals)
+        nomination_options = [{"label": v, "value": v} for v in nvals]
+
+    col_options = [
+        {"label": label, "value": field}
+        for field, label in ACTIVE_EXPORT_COLUMNS
+    ]
+    col_values = [field for field, _ in ACTIVE_EXPORT_COLUMNS]
+
+    # Build birth city campus options from the full cached df
+    birth_campus_options = [{"label": "(all birth campuses)", "value": ""}]
+    if "birth_city_campus" in df.columns:
+        bvals = sorted(v for v in df["birth_city_campus"].dropna().astype(str).unique() if v and v != "nan")
+        birth_campus_options += [{"label": v, "value": v} for v in bvals]
+
+    # Build residence city campus options from the full cached df
+    res_campus_options = [{"label": "(all current campuses)", "value": ""}]
+    if "residence_city_campus" in df.columns:
+        rvals = sorted(v for v in df["residence_city_campus"].dropna().astype(str).unique() if v and v != "nan")
+        res_campus_options += [{"label": v, "value": v} for v in rvals]
+
+    return (
+        df_view.to_dict("records"),
+        columns,
+        False,
+        False,
+        "\n".join(log_lines),
+        loading_msg,
+        enrollment_options,
+        [],   # default: no enrollment filter selected
+        nomination_options,
+        [],   # default: no nomination filter selected
+        col_options,
+        col_values,
+        birth_campus_options,
+        "",   # reset birth campus filter
+        res_campus_options,
+        "",   # reset current campus filter
+    )
+
+@app.callback(
+    Output("csv-file", "data"),
+    Input("btn-dl", "n_clicks"),
+    State("campus-dd", "value"),
+    State("birth-campus-dd", "value"),
+    State("current-campus-dd", "value"),
+    prevent_initial_call=True,
+)
+def download_csv(_, campus_val, birth_campus_val, current_campus_val):
+    if cached_df.empty:
+        return no_update
+    df_out = apply_campus_filters(
+        cached_df, campus_val, birth_campus_val, current_campus_val
+    )
+    return dcc.send_data_frame(df_out.to_csv, cached_name, index=False)
+
+@app.callback(
+    Output("csv-file-filtered", "data"),
+    Input("btn-dl-filter", "n_clicks"),
+    State("campus-dd", "value"),
+    State("birth-campus-dd", "value"),
+    State("current-campus-dd", "value"),
+    State("column-select", "value"),
+    State("enrollment-status-dd", "value"),
+    State("nomination-claimed-dd", "value"),
+    prevent_initial_call=True,
+)
+def download_filtered_csv(
+    _, campus_val, birth_campus_val, current_campus_val,
+    selected_fields, enrollment_status_vals, nomination_claimed_vals
+):
+    if cached_df.empty:
+        return no_update
+
+    df_out = apply_campus_filters(
+        cached_df, campus_val, birth_campus_val, current_campus_val
+    )
+
+    # Apply enrollment status filter for filtered CSV only
+    enrollment_col = next(
+        (c for c in ["enrollment_status", "current_enrollment.admin_status"] if c in df_out.columns),
+        None,
+    )
+    if enrollment_status_vals and enrollment_col:
+        df_out = df_out[
+            df_out[enrollment_col].astype(str).isin(enrollment_status_vals)
+        ]
+
+    # Apply nomination claimed filter for filtered CSV only
+    nomination_col = next(
+        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df_out.columns),
+        None,
+    )
+    if nomination_claimed_vals and nomination_col:
+        df_out = df_out[
+            df_out[nomination_col].astype(str).isin(nomination_claimed_vals)
+        ]
+
+    # Strip out TEST sports before selecting columns / renaming
+    df_out = remove_test_sports(df_out)
+    df_out = add_level_category(df_out)
+
+    # Use selected fields if provided, otherwise default to all export columns
+    if not selected_fields:
+        selected_fields = ACTIVE_FILTER_COLUMNS
+
+    # Only keep fields that actually exist in df
+    fields = [f for f in selected_fields if f in df_out.columns]
+    if not fields:
+        return no_update
+
+    df_filtered = df_out[fields].copy()
+
+    # Rename to pretty labels
+    rename_map = {field: ACTIVE_FIELD_TO_LABEL.get(field, field) for field in fields}
+    df_filtered.rename(columns=rename_map, inplace=True)
+
+    filename = cached_name.replace(".csv", "_filtered.csv")
+    return dcc.send_data_frame(df_filtered.to_csv, filename, index=False)
+
+# Preview of the filtered CSV (first 10 rows, same logic as download)
+@app.callback(
+    Output("filtered-preview", "data"),
+    Output("filtered-preview", "columns"),
+    Input("campus-dd", "value"),
+    Input("birth-campus-dd", "value"),
+    Input("current-campus-dd", "value"),
+    Input("column-select", "value"),
+    Input("enrollment-status-dd", "value"),
+    Input("nomination-claimed-dd", "value"),
+)
+def update_filtered_preview(
+    campus_val,
+    birth_campus_val,
+    current_campus_val,
+    selected_fields,
+    enrollment_status_vals,
+    nomination_claimed_vals,
+):
+    if cached_df.empty:
+        return [], []
+
+    df_out = apply_campus_filters(
+        cached_df, campus_val, birth_campus_val, current_campus_val
+    )
+
+    # Apply enrollment status filter
+    enrollment_col = next(
+        (c for c in ["enrollment_status", "current_enrollment.admin_status"] if c in df_out.columns),
+        None,
+    )
+    if enrollment_status_vals and enrollment_col:
+        df_out = df_out[
+            df_out[enrollment_col].astype(str).isin(enrollment_status_vals)
+        ]
+
+    # Apply nomination claimed filter
+    nomination_col = next(
+        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df_out.columns),
+        None,
+    )
+    if nomination_claimed_vals and nomination_col:
+        df_out = df_out[
+            df_out[nomination_col].astype(str).isin(nomination_claimed_vals)
+        ]
+
+    # Remove TEST sports
+    df_out = remove_test_sports(df_out)
+    df_out = add_level_category(df_out)
+
+    if df_out.empty:
+        return [], []
+
+    # Use selected fields if provided, otherwise default to all export columns
+    if not selected_fields:
+        selected_fields = ACTIVE_FILTER_COLUMNS
+
+    # Only keep fields that actually exist in df
+    fields = [f for f in selected_fields if f in df_out.columns]
+    if not fields:
+        return [], []
+
+    df_filtered = df_out[fields].copy()
+
+    # Rename to pretty labels (same as CSV)
+    rename_map = {field: ACTIVE_FIELD_TO_LABEL.get(field, field) for field in fields}
+    df_filtered.rename(columns=rename_map, inplace=True)
+
+    # Only show first 10 rows in preview
+    df_preview = df_filtered.head(10)
+
+    columns = [{"name": c, "id": c} for c in df_preview.columns]
+    data = df_preview.to_dict("records")
+
+    return data, columns
+
+# -------------------------------------------------------------------------
+if __name__ == "__main__":
+    in_spyder = running_in_spyder()
+    run_host = os.getenv("HOST", "127.0.0.1" if in_spyder else "0.0.0.0")
+    run_port = int(os.getenv("PORT", "8050"))
+    debug_env = os.getenv("DASH_DEBUG")
+    run_debug = (debug_env == "1") if debug_env is not None else (not in_spyder)
+    app.run(
+        debug=run_debug,
+        host=run_host,
+        port=run_port,
+        use_reloader=not in_spyder,
+    )
