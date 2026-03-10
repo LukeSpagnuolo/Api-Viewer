@@ -80,14 +80,13 @@ ROLE_OPTS = [
     {"label": "Coach", "value": "coach"},
     {"label": "Staff", "value": "staff"},
 ]
-ROLE_ID_MAP = {"athlete": 1, "coach": 2, "staff": 4}
 
 
 
 # -------------------------------------------------------------------------
 # IMPORTS & APP INITIALISATION
 # -------------------------------------------------------------------------
-import json, time, requests, pandas as pd, random, math
+import json, time, requests, pandas as pd, random, difflib
 from requests.exceptions import ReadTimeout, ConnectTimeout, ConnectionError
 from dash_auth_external import DashAuthExternal
 from dash import Dash, html, dcc, dash_table, Input, Output, State, no_update
@@ -100,9 +99,6 @@ auth = DashAuthExternal(
 )
 server = auth.server
 app = Dash(__name__, server=server)
-
-# -------------------------------------------------------------------------
-# SAFE STRING + UNIVERSAL FLATTENING
 
 # -------------------------------------------------------------------------
 # SAFE STRING + UNIVERSAL FLATTENING
@@ -193,14 +189,6 @@ def flatten_report_row(row: dict, campus_id, report_columns: list) -> dict:
             continue
         flat[k] = safe_str(v)
 
-    # Keep existing campus fields used elsewhere in the app
-    if isinstance(campus_id, int) and campus_id in CAMPUS_LABEL_MAP:
-        flat["campus_id"] = str(campus_id)
-        flat["campus_label"] = CAMPUS_LABEL_MAP.get(campus_id, "")
-    else:
-        flat["campus_id"] = ""
-        flat["campus_label"] = "All Campuses"
-
     return flat
 
 def flatten_profile(p, campus_id):
@@ -209,12 +197,6 @@ def flatten_profile(p, campus_id):
     and add campus_by_birth / current_campus using the city → campus mapping.
     """
     flat = flatten_json(p)
-
-    # API / nomination campus from profile
-    flat["campus_id"] = str(campus_id)
-    flat["campus_label"] = CAMPUS_LABEL_MAP.get(
-        campus_id, f"Unknown ({campus_id})"
-    )
 
     return flat
 
@@ -353,54 +335,54 @@ cached_df, cached_name = pd.DataFrame(), ""
 # EXPORT COLUMN SPECS (field name → pretty label)
 # -------------------------------------------------------------------------
 EXPORT_COLUMNS = [
-    ("role_slug",                          "role"),
-    ("person.first_name",                  "First Name"),
-    ("person.last_name",                   "Last Name"),
-    ("person.email",                       "Email"),
-    ("person.dob",                         "Birth Date"),
-    ("person.guardian.first_name",         "Guardian First Name"),
-    ("person.guardian.last_name",          "Guardian Last Name"),
-    ("person.guardian.relationship",       "Guardian Relationship"),
-    ("person.guardian.email",              "Guardian Email"),
-    ("sport.name",                         "Sport"),
-    ("current_enrollment.admin_status",    "Enrollment Status"),
-    ("current_nomination.organization.name","Nomination Organization"),
-    ("current_nomination.fiscal_year",     "Nomination Fiscal Year"),
-    ("current_nomination.end_date",        "Nomination End Date"),
-    ("current_nomination.sport.name",      "Nomination Sport Name"),
-    ("current_nomination.redeemed",        "Nomination Claimed"),
-    ("current_nomination.carding_level",   "Nomination Carding Level"),
-    ("level_category",                     "Level Category"),
-    ("residence_city.name",                "Current Residence"),
-    ("birth_city.name",                    "Birth City"),
-    ("discipline",                         "Discipline"),
-    ("sex_of_competition",                 "Sex of Competition"),
-    ("gender",                             "Gender"),
-    ("ethnicity",                          "Ethnicity"),
-    ("ethnicity_other",                    "Ethnicity Other"),
-    ("pronouns",                           "Pronouns"),
-    ("pronouns_other",                     "Pronouns Other"),
-    ("disability",                         "Disability"),
-    ("birth_country",                      "Birth Country"),
-    ("residence_country",                  "Residence Country"),
-    ("education_attending",                "Attending Education"),
-    ("education_level",                    "Education Level"),
-    ("education_institution",              "Education Institution"),
-    ("education_css",                      "CSS"),
-    ("campus_label",                       "Campus Preferred"),
-    ("birth_city_campus",                  "Campus by Birth"),
-    ("residence_city_campus",              "Current Campus"),
-    ("current_nomination.nccp_number",     "Nccp Number"),
-    ("current_nomination.coach_role",      "Coach Role"),
-    ("current_nomination.coach_level",     "Coach Level"),
-    ("major_games",                        "Major Games"),
+    ("role",                    "Role"),
+    ("first_name",              "First Name"),
+    ("last_name",               "Last Name"),
+    ("email",                   "Email"),
+    ("dob",                     "Birth Date"),
+    ("age",                     "Age"),
+    ("guardian_first_name",     "Guardian First Name"),
+    ("guardian_last_name",      "Guardian Last Name"),
+    ("guardian_relationship",   "Guardian Relationship"),
+    ("guardian_email",          "Guardian Email"),
+    ("sport",                   "Sport"),
+    ("enrollment_status",       "Enrollment Status"),
+    ("nomination_organization", "Nomination Organization"),
+    ("nomination_fiscal_year",  "Nomination Fiscal Year"),
+    ("nomination_end_date",     "Nomination End Date"),
+    ("nomination_sport_name",   "Nomination Sport Name"),
+    ("nomination_claimed",      "Nomination Claimed"),
+    ("nomination_approved",     "Nomination Approved"),
+    ("nomination_status",       "Nomination Status"),
+    ("athlete_carding",         "Carding Level"),
+    ("level_category",          "Level Category"),
+    ("current_residence",       "Current Residence"),
+    ("birth_city",              "Birth City"),
+    ("discipline",              "Discipline"),
+    ("sex_of_competition",      "Sex of Competition"),
+    ("gender",                  "Gender"),
+    ("athlete_ethnicity",       "Ethnicity"),
+    ("pronouns",                "Pronouns"),
+    ("pronouns_other",          "Pronouns Other"),
+    ("disability",              "Disability"),
+    ("birth_country",           "Birth Country"),
+    ("residence_country",       "Residence Country"),
+    ("attending_education",     "Attending Education"),
+    ("education_level",         "Education Level"),
+    ("education_institution",   "Education Institution"),
+    ("css",                     "CSS"),
+    ("campus_label",            "Campus Preferred"),
+    ("birth_city_campus",       "Campus by Birth"),
+    ("residence_city_campus",   "Current Campus"),
+    ("nccp_number",             "Nccp Number"),
+    ("coach_role",              "Coach Role"),
+    ("coach_level",             "Coach Level"),
 ]
 
 # list of internal field names for filtering
 FILTER_COLUMNS = [field for field, _ in EXPORT_COLUMNS]
 
 FIELD_TO_LABEL = {field: label for field, label in EXPORT_COLUMNS}
-LABEL_TO_FIELD = {label: field for field, label in EXPORT_COLUMNS}
 
 # Dynamic export mapping refreshed on each successful fetch
 ACTIVE_EXPORT_COLUMNS = EXPORT_COLUMNS.copy()
@@ -426,9 +408,8 @@ def remove_test_sports(df: pd.DataFrame) -> pd.DataFrame:
 
     cols = [
         c for c in [
-            "sport.name",
-            "current_nomination.sport.name",
             "sport",
+            "nomination_sport_name",
             "Sport",
             "Nomination Sport Name",
         ]
@@ -484,6 +465,104 @@ def add_level_category(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # -------------------------------------------------------------------------
+# NAME-MATCH PAIR FINDER
+# -------------------------------------------------------------------------
+def find_name_matched_pairs(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Find pairs of rows where one has row_kind='profile' and another has
+    row_kind='nomination', with matching or similar first/last names.
+    Returns a DataFrame of those matched rows, sorted so pairs appear adjacent.
+    """
+    SIMILARITY_THRESHOLD = 0.82
+
+    row_kind_col = next(
+        (c for c in ["row_kind", "kind", "row_type", "type"] if c in df.columns),
+        None,
+    )
+    if row_kind_col is None:
+        return pd.DataFrame()
+
+    first_name_col = next(
+        (c for c in ["first_name", "person.first_name", "First Name"] if c in df.columns),
+        None,
+    )
+    last_name_col = next(
+        (c for c in ["last_name", "person.last_name", "Last Name"] if c in df.columns),
+        None,
+    )
+    if not first_name_col or not last_name_col:
+        return pd.DataFrame()
+
+    def norm(row):
+        first = str(row.get(first_name_col, "") or "").strip().lower()
+        last = str(row.get(last_name_col, "") or "").strip().lower()
+        return f"{first} {last}".strip()
+
+    kinds = df[row_kind_col].fillna("").str.strip().str.lower()
+    profiles = df[kinds == "profile"].copy()
+    nominations = df[kinds == "nomination"].copy()
+
+    if profiles.empty or nominations.empty:
+        return pd.DataFrame()
+
+    profiles["_norm_name"] = profiles.apply(norm, axis=1)
+    nominations["_norm_name"] = nominations.apply(norm, axis=1)
+
+    # Resolve sport columns (profile sport vs nomination sport)
+    profile_sport_col = next(
+        (c for c in ["sport", "sport.name", "Sport"] if c in df.columns), None
+    )
+    nomination_sport_col = next(
+        (c for c in ["nomination_sport_name", "current_nomination.sport.name", "Nomination Sport Name"]
+         if c in df.columns),
+        profile_sport_col,  # fallback to same column if no separate nomination sport column
+    )
+
+    def norm_sport(val):
+        return str(val or "").strip().lower()
+
+    def sports_compatible(p_row, n_row):
+        """Return True if sports match or either side is multisport/blank."""
+        p_sport = norm_sport(p_row.get(profile_sport_col) if profile_sport_col else "")
+        n_sport = norm_sport(n_row.get(nomination_sport_col) if nomination_sport_col else "")
+        if not p_sport or not n_sport:
+            return True  # can't determine — allow
+        if "multisport" in p_sport or "multisport" in n_sport:
+            return True
+        return p_sport == n_sport
+
+    matched_pairs = []  # (profile_idx, nomination_idx, sort_name)
+    for p_idx, p_row in profiles.iterrows():
+        p_name = p_row["_norm_name"]
+        if not p_name:
+            continue
+        for n_idx, n_row in nominations.iterrows():
+            n_name = n_row["_norm_name"]
+            if not n_name:
+                continue
+            ratio = difflib.SequenceMatcher(None, p_name, n_name).ratio()
+            if ratio >= SIMILARITY_THRESHOLD and sports_compatible(p_row, n_row):
+                matched_pairs.append((p_idx, n_idx, p_name))
+
+    if not matched_pairs:
+        return pd.DataFrame()
+
+    # Sort pairs alphabetically by profile name so output is ordered
+    matched_pairs.sort(key=lambda x: x[2])
+
+    # Build ordered index: profile row then its matching nomination row
+    seen: set = set()
+    ordered_indices = []
+    for p_idx, n_idx, _ in matched_pairs:
+        for idx in (p_idx, n_idx):
+            if idx not in seen:
+                seen.add(idx)
+                ordered_indices.append(idx)
+
+    return df.loc[ordered_indices].copy()
+
+
+# -------------------------------------------------------------------------
 # CAMPUS FILTER HELPER
 # -------------------------------------------------------------------------
 def apply_campus_filters(df, campus_val, birth_campus_val, current_campus_val):
@@ -533,46 +612,6 @@ app.layout = html.Div(
                 "marginBottom": "1rem",
                 "fontSize": "0.95rem",
                 "color": "#555555",
-            },
-        ),
-
-        # Campus + role filters + Fetch button
-        html.Div(
-            [
-                dcc.Dropdown(
-                    id="campus-dd",
-                    options=CAMPUS_OPTS,
-                    value="all",
-                    placeholder="Filter: API campus (campus_label)",
-                    style={"width": "260px"},
-                ),
-                dcc.Dropdown(
-                    id="birth-campus-dd",
-                    options=[{"label": "(all birth campuses)", "value": ""}],
-                    value="",
-                    placeholder="Filter: birth city campus (fetch rows first)",
-                    style={"width": "260px", "marginLeft": "0.6rem"},
-                ),
-                dcc.Dropdown(
-                    id="current-campus-dd",
-                    options=[{"label": "(all current campuses)", "value": ""}],
-                    value="",
-                    placeholder="Filter: residence campus (fetch rows first)",
-                    style={"width": "260px", "marginLeft": "0.6rem"},
-                ),
-                dcc.Dropdown(
-                    id="role-dd",
-                    options=ROLE_OPTS,
-                    value="",
-                    placeholder="Filter: role",
-                    style={"width": "160px", "marginLeft": "0.6rem"},
-                ),
-            ],
-            style={
-                "display": "flex",
-                "alignItems": "center",
-                "flexWrap": "wrap",
-                "marginBottom": "1rem",
             },
         ),
 
@@ -678,6 +717,39 @@ app.layout = html.Div(
             },
         ),
 
+        # Download filters (campus + role)
+        html.Div(
+            [
+                dcc.Dropdown(
+                    id="birth-campus-dd",
+                    options=[{"label": "(all birth campuses)", "value": ""}],
+                    value="",
+                    placeholder="Filter: birth city campus",
+                    style={"width": "260px"},
+                ),
+                dcc.Dropdown(
+                    id="current-campus-dd",
+                    options=[{"label": "(all current campuses)", "value": ""}],
+                    value="",
+                    placeholder="Filter: residence campus",
+                    style={"width": "260px", "marginLeft": "0.6rem"},
+                ),
+                dcc.Dropdown(
+                    id="role-dd",
+                    options=ROLE_OPTS,
+                    value="",
+                    placeholder="Filter: role",
+                    style={"width": "160px", "marginLeft": "0.6rem"},
+                ),
+            ],
+            style={
+                "display": "flex",
+                "alignItems": "center",
+                "flexWrap": "wrap",
+                "marginBottom": "1rem",
+            },
+        ),
+
         # Filtered CSV preview
         html.Div(
             "Filtered CSV preview (first 10 rows)",
@@ -763,34 +835,43 @@ app.layout = html.Div(
             style={"marginBottom": "0.6rem"},
         ),
 
-        # Enrollment status filter for filtered CSV
-        html.Div(
-            [
-                dcc.Dropdown(
-                    id="enrollment-status-dd",
-                    options=[],  # populated after fetch
-                    value=[],
-                    multi=True,
-                    placeholder="Filter by enrollment status for filtered CSV (optional)",
-                    style={"width": "100%"},
-                )
-            ],
-            style={"marginBottom": "0.6rem"},
+        # ── Prebuilt Reports ──────────────────────────────────────────────
+        html.Hr(style={"marginTop": "1.8rem", "marginBottom": "1rem"}),
+        html.H3(
+            "Prebuilt Reports",
+            style={"marginBottom": "0.4rem", "fontSize": "1.2rem", "color": "#003366"},
         ),
-
-        # Nomination claimed filter for filtered CSV
         html.Div(
             [
-                dcc.Dropdown(
-                    id="nomination-claimed-dd",
-                    options=[],  # populated after fetch
-                    value=[],
-                    multi=True,
-                    placeholder="Filter by nomination claimed for filtered CSV (optional)",
-                    style={"width": "100%"},
-                )
+                html.Button(
+                    "Download Pending Unmatched Report",
+                    id="btn-dl-pending-unmatched",
+                    n_clicks=0,
+                    disabled=True,
+                    style={
+                        "padding": "0.45rem 1.2rem",
+                        "backgroundColor": "#5c2d91",
+                        "color": "white",
+                        "border": "none",
+                        "cursor": "pointer",
+                    },
+                ),
+                html.Button(
+                    "Download Unclaimed Nominations",
+                    id="btn-dl-unclaimed-nominations",
+                    n_clicks=0,
+                    disabled=True,
+                    style={
+                        "padding": "0.45rem 1.2rem",
+                        "marginLeft": "0.8rem",
+                        "backgroundColor": "#b83c00",
+                        "color": "white",
+                        "border": "none",
+                        "cursor": "pointer",
+                    },
+                ),
             ],
-            style={"marginBottom": "0.8rem"},
+            style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "marginBottom": "1rem"},
         ),
 
         # Collapsible technical log at the very bottom
@@ -826,6 +907,8 @@ app.layout = html.Div(
         dcc.Store(id="col-defs-store", data=[]),
         dcc.Download(id="csv-file"),
         dcc.Download(id="csv-file-filtered"),
+        dcc.Download(id="csv-file-pending-unmatched"),
+        dcc.Download(id="csv-file-unclaimed-nominations"),
     ],
 )
 
@@ -866,12 +949,10 @@ def fetch_columns_callback(_):
     Output("preview", "columns"),
     Output("btn-dl", "disabled"),
     Output("btn-dl-filter", "disabled"),
+    Output("btn-dl-pending-unmatched", "disabled"),
+    Output("btn-dl-unclaimed-nominations", "disabled"),
     Output("log", "children"),
     Output("loading-message", "children"),
-    Output("enrollment-status-dd", "options"),
-    Output("enrollment-status-dd", "value"),
-    Output("nomination-claimed-dd", "options"),
-    Output("nomination-claimed-dd", "value"),
     Output("column-select", "options"),
     Output("column-select", "value"),
     Output("birth-campus-dd", "options"),
@@ -879,15 +960,11 @@ def fetch_columns_callback(_):
     Output("current-campus-dd", "options"),
     Output("current-campus-dd", "value"),
     Input("btn-fetch-rows", "n_clicks"),
-    State("campus-dd", "value"),
-    State("birth-campus-dd", "value"),
-    State("current-campus-dd", "value"),
-    State("role-dd", "value"),
     State("fetch-columns-select", "value"),
     State("col-defs-store", "data"),
     prevent_initial_call=True,
 )
-def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val, fetch_col_val, col_defs_data):
+def fetch_profiles(_, fetch_col_val, col_defs_data):
     token = auth.get_token()
     if not token:
         return (
@@ -895,12 +972,10 @@ def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val
             no_update,
             True,
             True,
+            True,
+            True,
             "No OAuth token – log in.",
             "",
-            [],
-            [],
-            [],
-            [],
             no_update,
             no_update,
             no_update,
@@ -911,7 +986,7 @@ def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val
 
     headers = {"Authorization": f"Bearer {token}"}
 
-    rows_total, flattened, log_lines = [], [], []
+    flattened, log_lines = [], []
 
     # Use col_defs from the store (populated by Fetch Columns button)
     col_defs = col_defs_data or []
@@ -934,8 +1009,6 @@ def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val
     if selected_keys:
         fetch_url += "?columns=" + ",".join(selected_keys)
 
-    if role_val:
-        log_lines.append("Role filter is currently ignored for report-rows endpoint.")
     log_lines.append(f"\nPulling report rows: {len(selected_keys)} column(s) requested")
 
     batch, batch_meta = fetch_paginated(fetch_url, headers, log_lines)
@@ -949,7 +1022,6 @@ def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val
         else:
             # Fallback for legacy profile payloads
             flattened.append(flatten_profile(r, 0))
-        rows_total.append(r)
 
     log_lines.append(f"  added {len(batch)} rows")
 
@@ -959,12 +1031,10 @@ def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val
             [],
             True,
             True,
+            True,
+            True,
             "\n".join(log_lines),
             "No profiles found.",
-            [],
-            [],
-            [],
-            [],
             no_update,
             no_update,
             no_update,
@@ -983,50 +1053,10 @@ def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val
     ACTIVE_EXPORT_COLUMNS = build_export_columns(df, report_meta)
     ACTIVE_FILTER_COLUMNS = [field for field, _ in ACTIVE_EXPORT_COLUMNS]
     ACTIVE_FIELD_TO_LABEL = {field: label for field, label in ACTIVE_EXPORT_COLUMNS}
-    campus_tag = "all"  # we always fetch all campuses now
-    cached_name = f"profiles_{campus_tag}{'_'+role_val if role_val else ''}.csv"
+    cached_name = "profiles_all.csv"
 
-    # Apply the three campus filters for the preview
-    df_view = apply_campus_filters(
-        df, campus_val, birth_campus_val, current_campus_val
-    )
-
-    columns = [{"name": ACTIVE_FIELD_TO_LABEL.get(c, c), "id": c} for c in df_view.columns]
-    loading_msg = f"Fetched {len(df_view)} profiles (from {len(df)} total)."
-
-    # Build enrollment status options from the full cached df (not filtered)
-    enrollment_options = []
-    enrollment_col = next(
-        (c for c in ["enrollment_status", "current_enrollment.admin_status"] if c in df.columns),
-        None,
-    )
-    if enrollment_col:
-        vals = (
-            df[enrollment_col]
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
-        )
-        vals = sorted(vals)
-        enrollment_options = [{"label": v, "value": v} for v in vals]
-
-    # Build nomination claimed options from the full cached df
-    nomination_options = []
-    nomination_col = next(
-        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df.columns),
-        None,
-    )
-    if nomination_col:
-        nvals = (
-            df[nomination_col]
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
-        )
-        nvals = sorted(nvals)
-        nomination_options = [{"label": v, "value": v} for v in nvals]
+    columns = [{"name": ACTIVE_FIELD_TO_LABEL.get(c, c), "id": c} for c in df.columns]
+    loading_msg = f"Fetched {len(df)} profiles."
 
     col_options = [
         {"label": label, "value": field}
@@ -1047,16 +1077,14 @@ def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val
         res_campus_options += [{"label": v, "value": v} for v in rvals]
 
     return (
-        df_view.to_dict("records"),
+        df.to_dict("records"),
         columns,
+        False,
+        False,
         False,
         False,
         "\n".join(log_lines),
         loading_msg,
-        enrollment_options,
-        [],   # default: no enrollment filter selected
-        nomination_options,
-        [],   # default: no nomination filter selected
         col_options,
         col_values,
         birth_campus_options,
@@ -1068,60 +1096,34 @@ def fetch_profiles(_, campus_val, birth_campus_val, current_campus_val, role_val
 @app.callback(
     Output("csv-file", "data"),
     Input("btn-dl", "n_clicks"),
-    State("campus-dd", "value"),
-    State("birth-campus-dd", "value"),
-    State("current-campus-dd", "value"),
     prevent_initial_call=True,
 )
-def download_csv(_, campus_val, birth_campus_val, current_campus_val):
+def download_csv(_):
     if cached_df.empty:
         return no_update
-    df_out = apply_campus_filters(
-        cached_df, campus_val, birth_campus_val, current_campus_val
-    )
-    return dcc.send_data_frame(df_out.to_csv, cached_name, index=False)
+    return dcc.send_data_frame(cached_df.to_csv, cached_name, index=False)
 
 @app.callback(
     Output("csv-file-filtered", "data"),
     Input("btn-dl-filter", "n_clicks"),
-    State("campus-dd", "value"),
     State("birth-campus-dd", "value"),
     State("current-campus-dd", "value"),
+    State("role-dd", "value"),
     State("column-select", "value"),
-    State("enrollment-status-dd", "value"),
-    State("nomination-claimed-dd", "value"),
     prevent_initial_call=True,
 )
 def download_filtered_csv(
-    _, campus_val, birth_campus_val, current_campus_val,
-    selected_fields, enrollment_status_vals, nomination_claimed_vals
+    _, birth_campus_val, current_campus_val, role_val, selected_fields
 ):
     if cached_df.empty:
         return no_update
 
     df_out = apply_campus_filters(
-        cached_df, campus_val, birth_campus_val, current_campus_val
+        cached_df, None, birth_campus_val, current_campus_val
     )
 
-    # Apply enrollment status filter for filtered CSV only
-    enrollment_col = next(
-        (c for c in ["enrollment_status", "current_enrollment.admin_status"] if c in df_out.columns),
-        None,
-    )
-    if enrollment_status_vals and enrollment_col:
-        df_out = df_out[
-            df_out[enrollment_col].astype(str).isin(enrollment_status_vals)
-        ]
-
-    # Apply nomination claimed filter for filtered CSV only
-    nomination_col = next(
-        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df_out.columns),
-        None,
-    )
-    if nomination_claimed_vals and nomination_col:
-        df_out = df_out[
-            df_out[nomination_col].astype(str).isin(nomination_claimed_vals)
-        ]
+    if role_val and "role" in df_out.columns:
+        df_out = df_out[df_out["role"].str.lower() == role_val.lower()]
 
     # Strip out TEST sports before selecting columns / renaming
     df_out = remove_test_sports(df_out)
@@ -1145,51 +1147,120 @@ def download_filtered_csv(
     filename = cached_name.replace(".csv", "_filtered.csv")
     return dcc.send_data_frame(df_filtered.to_csv, filename, index=False)
 
+@app.callback(
+    Output("csv-file-pending-unmatched", "data"),
+    Input("btn-dl-pending-unmatched", "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_pending_unmatched(_):
+    if cached_df.empty:
+        return no_update
+
+    df_base = cached_df.copy()
+
+    # Exclude rows where nomination has already been claimed
+    nomination_col = next(
+        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df_base.columns),
+        None,
+    )
+    if nomination_col:
+        s = df_base[nomination_col].fillna("").astype(str).str.strip().str.lower()
+        df_base = df_base[~s.isin(["true"])]
+
+    # Find pairs of profile+nomination rows with matching/similar names
+    df_out = find_name_matched_pairs(df_base)
+
+    if df_out.empty:
+        return no_update
+
+    # Fixed columns for this report
+    pending_cols = [
+        ("role",              "Role"),
+        ("first_name",        "First Name"),
+        ("last_name",         "Last Name"),
+        ("sport",             "Sport"),
+        ("enrollment_status", "Enrollment Status"),
+        ("email",             "Email"),
+    ]
+    fields = [f for f, _ in pending_cols if f in df_out.columns]
+    rename_map = {f: lbl for f, lbl in pending_cols if f in df_out.columns}
+    df_out = df_out[fields].copy()
+    df_out.rename(columns=rename_map, inplace=True)
+
+    filename = cached_name.replace(".csv", "_pending_unmatched.csv")
+    return dcc.send_data_frame(df_out.to_csv, filename, index=False)
+
+
+@app.callback(
+    Output("csv-file-unclaimed-nominations", "data"),
+    Input("btn-dl-unclaimed-nominations", "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_unclaimed_nominations(_):
+    if cached_df.empty:
+        return no_update
+
+    df_out = cached_df.copy()
+
+    # Keep only rows where nomination claimed is explicitly True (redeemed=False means unclaimed)
+    nomination_col = next(
+        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df_out.columns),
+        None,
+    )
+    if nomination_col:
+        s = df_out[nomination_col].fillna("").astype(str).str.strip().str.lower()
+        df_out = df_out[s == "false"]
+
+    # Sort alphabetically by last name
+    last_name_col = next(
+        (c for c in ["last_name", "person.last_name", "Last Name"] if c in df_out.columns),
+        None,
+    )
+    if last_name_col:
+        df_out = df_out.sort_values(by=last_name_col, ascending=True, key=lambda s: s.str.lower().fillna(""))
+
+    # Fixed columns for this report
+    unclaimed_cols = [
+        ("role",          "Role"),
+        ("first_name",    "First Name"),
+        ("last_name",     "Last Name"),
+        ("email",         "Email"),
+        ("guardian_email", "Guardian Email"),
+        ("age",           "Age"),
+    ]
+    fields = [f for f, _ in unclaimed_cols if f in df_out.columns]
+    rename_map = {f: lbl for f, lbl in unclaimed_cols if f in df_out.columns}
+    df_out = df_out[fields].copy()
+    df_out.rename(columns=rename_map, inplace=True)
+
+    filename = cached_name.replace(".csv", "_unclaimed_nominations.csv")
+    return dcc.send_data_frame(df_out.to_csv, filename, index=False)
+
+
 # Preview of the filtered CSV (first 10 rows, same logic as download)
 @app.callback(
     Output("filtered-preview", "data"),
     Output("filtered-preview", "columns"),
-    Input("campus-dd", "value"),
     Input("birth-campus-dd", "value"),
     Input("current-campus-dd", "value"),
+    Input("role-dd", "value"),
     Input("column-select", "value"),
-    Input("enrollment-status-dd", "value"),
-    Input("nomination-claimed-dd", "value"),
 )
 def update_filtered_preview(
-    campus_val,
     birth_campus_val,
     current_campus_val,
+    role_val,
     selected_fields,
-    enrollment_status_vals,
-    nomination_claimed_vals,
 ):
     if cached_df.empty:
         return [], []
 
     df_out = apply_campus_filters(
-        cached_df, campus_val, birth_campus_val, current_campus_val
+        cached_df, None, birth_campus_val, current_campus_val
     )
 
-    # Apply enrollment status filter
-    enrollment_col = next(
-        (c for c in ["enrollment_status", "current_enrollment.admin_status"] if c in df_out.columns),
-        None,
-    )
-    if enrollment_status_vals and enrollment_col:
-        df_out = df_out[
-            df_out[enrollment_col].astype(str).isin(enrollment_status_vals)
-        ]
-
-    # Apply nomination claimed filter
-    nomination_col = next(
-        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df_out.columns),
-        None,
-    )
-    if nomination_claimed_vals and nomination_col:
-        df_out = df_out[
-            df_out[nomination_col].astype(str).isin(nomination_claimed_vals)
-        ]
+    if role_val and "role" in df_out.columns:
+        df_out = df_out[df_out["role"].str.lower() == role_val.lower()]
 
     # Remove TEST sports
     df_out = remove_test_sports(df_out)
