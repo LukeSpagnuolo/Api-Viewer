@@ -531,17 +531,49 @@ def find_name_matched_pairs(df: pd.DataFrame) -> pd.DataFrame:
             return True
         return p_sport == n_sport
 
+    email_col = next((c for c in ["email"] if c in df.columns), None)
+    guardian_email_col = next((c for c in ["guardian_email"] if c in df.columns), None)
+
+    def already_linked(p_row, n_row):
+        """Return True if both email and guardian_email match — pair is already connected."""
+        if not email_col or not guardian_email_col:
+            return False
+        p_email = str(p_row.get(email_col) or "").strip().lower()
+        n_email = str(n_row.get(email_col) or "").strip().lower()
+        p_guard = str(p_row.get(guardian_email_col) or "").strip().lower()
+        n_guard = str(n_row.get(guardian_email_col) or "").strip().lower()
+        if not p_email or not n_email or not p_guard or not n_guard:
+            return False
+        return p_email == n_email and p_guard == n_guard
+
+    enrollment_col = next(
+        (c for c in ["enrollment_status", "Enrollment Status"] if c in df.columns), None
+    )
+
     matched_pairs = []  # (profile_idx, nomination_idx, sort_name)
     for p_idx, p_row in profiles.iterrows():
+        # Only include pairs where the profile's enrollment status is Pending
+        if enrollment_col:
+            enroll_val = str(p_row.get(enrollment_col) or "").strip().lower()
+            if enroll_val != "pending":
+                continue
+
         p_name = p_row["_norm_name"]
-        if not p_name:
-            continue
         for n_idx, n_row in nominations.iterrows():
             n_name = n_row["_norm_name"]
-            if not n_name:
+
+            # Both blank → count as a match (no name data on either side)
+            if not p_name and not n_name:
+                if sports_compatible(p_row, n_row) and not already_linked(p_row, n_row):
+                    matched_pairs.append((p_idx, n_idx, p_name))
                 continue
+
+            # Only one side is blank → can't determine a match
+            if not p_name or not n_name:
+                continue
+
             ratio = difflib.SequenceMatcher(None, p_name, n_name).ratio()
-            if ratio >= SIMILARITY_THRESHOLD and sports_compatible(p_row, n_row):
+            if ratio >= SIMILARITY_THRESHOLD and sports_compatible(p_row, n_row) and not already_linked(p_row, n_row):
                 matched_pairs.append((p_idx, n_idx, p_name))
 
     if not matched_pairs:
@@ -1175,12 +1207,13 @@ def download_pending_unmatched(_):
 
     # Fixed columns for this report
     pending_cols = [
-        ("role",              "Role"),
-        ("first_name",        "First Name"),
-        ("last_name",         "Last Name"),
-        ("sport",             "Sport"),
+        ("role",           "Role"),
+        ("first_name",     "First Name"),
+        ("last_name",      "Last Name"),
+        ("guardian_email", "Guardian Email"),
+        ("sport",          "Sport"),
         ("enrollment_status", "Enrollment Status"),
-        ("email",             "Email"),
+        ("email",          "Email"),
     ]
     fields = [f for f, _ in pending_cols if f in df_out.columns]
     rename_map = {f: lbl for f, lbl in pending_cols if f in df_out.columns}
@@ -1221,12 +1254,14 @@ def download_unclaimed_nominations(_):
 
     # Fixed columns for this report
     unclaimed_cols = [
-        ("role",          "Role"),
-        ("first_name",    "First Name"),
-        ("last_name",     "Last Name"),
-        ("email",         "Email"),
-        ("guardian_email", "Guardian Email"),
-        ("age",           "Age"),
+        ("role",                "Role"),
+        ("first_name",         "First Name"),
+        ("last_name",          "Last Name"),
+        ("email",              "Email"),
+        ("guardian_first_name", "Guardian First Name"),
+        ("guardian_last_name",  "Guardian Last Name"),
+        ("guardian_email",     "Guardian Email"),
+        ("age",                "Age"),
     ]
     fields = [f for f, _ in unclaimed_cols if f in df_out.columns]
     rename_map = {f: lbl for f, lbl in unclaimed_cols if f in df_out.columns}
