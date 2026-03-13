@@ -86,7 +86,7 @@ ROLE_OPTS = [
 # -------------------------------------------------------------------------
 # IMPORTS & APP INITIALISATION
 # -------------------------------------------------------------------------
-import json, time, requests, pandas as pd, random, difflib
+import io, json, time, zipfile, requests, pandas as pd, random, difflib
 from requests.exceptions import ReadTimeout, ConnectTimeout, ConnectionError
 from dash_auth_external import DashAuthExternal
 from dash import Dash, html, dcc, dash_table, Input, Output, State, no_update
@@ -390,6 +390,25 @@ ACTIVE_FILTER_COLUMNS = FILTER_COLUMNS.copy()
 ACTIVE_FIELD_TO_LABEL = FIELD_TO_LABEL.copy()
 
 # -------------------------------------------------------------------------
+# NATIONAL INVENTORY REPORT COLUMN SPECS
+# -------------------------------------------------------------------------
+NATIONAL_INVENTORY_COLUMNS = [
+    ("season", "Season"),
+    ("training_group", "Training Group"),
+    ("role", "Role"),
+    ("first_name", "First Name"),
+    ("last_name", "Last Name"),
+    ("sport", "Sport"),
+    ("enrollment_status", "Enrollment Status"),
+    ("nomination_approved", "Nomination Approved"),
+    ("nomination_claimed", "Nomination Claimed"),
+    ("athlete_carding", "Carding Level"),
+    ("level_category", "Level Category"),
+    ("sex_of_competition", "Sex of Competition"),
+    ("nccp_number", "Nccp Number"),
+]
+
+# -------------------------------------------------------------------------
 # TEST SPORTS TO EXCLUDE FROM FILTERED DOWNLOAD
 # -------------------------------------------------------------------------
 TEST_SPORTS = {
@@ -463,6 +482,108 @@ def add_level_category(df: pd.DataFrame) -> pd.DataFrame:
 
     df["level_category"] = cat
     return df
+
+
+def infer_season_from_sport(sport_val: str) -> str:
+    """Infer season from a normalized, explicit sport map."""
+    s = " ".join(str(sport_val or "").strip().lower().split())
+    if not s:
+        return ""
+
+    season_by_sport = {
+        "alpine ski": "Winter",
+        "archery": "Summer",
+        "artistic gymnastics": "Summer",
+        "artistic swimming": "Summer",
+        "athletics": "Summer",
+        "badminton": "Summer",
+        "baseball": "Summer",
+        "basketball": "Summer",
+        "beach volleyball": "Summer",
+        "biathlon": "Winter",
+        "bobsleigh": "Winter",
+        "boccia": "Summer",
+        "boxing": "Summer",
+        "canoe kayak": "Summer",
+        "cinderball (test)": "Summer",
+        "cricket": "Summer",
+        "cross-country ski": "Winter",
+        "curling": "Winter",
+        "cycling": "Summer",
+        "diving": "Summer",
+        "equestrian": "Summer",
+        "fencing": "Summer",
+        "field hockey": "Summer",
+        "figure skating": "Winter",
+        "football": "Summer",
+        "football 5-a-side": "Summer",
+        "freestyle ski": "Winter",
+        "goalball": "Summer",
+        "golf": "Summer",
+        "hockey": "Winter",
+        "judo": "Summer",
+        "karate": "Summer",
+        "lacrosse": "Summer",
+        "luge": "Winter",
+        "multisport": "Summer",
+        "netball": "Summer",
+        "nordic combined": "Winter",
+        "nordic vaulting (test)": "Winter",
+        "para alpine ski": "Winter",
+        "para athletics": "Summer",
+        "para badminton": "Summer",
+        "para cross-country ski": "Winter",
+        "para cycling": "Summer",
+        "para equestrian": "Summer",
+        "para ice hockey": "Winter",
+        "para rowing": "Summer",
+        "para sailing": "Summer",
+        "para snowboard": "Winter",
+        "para swimming": "Summer",
+        "para table tennis": "Summer",
+        "para triathlon": "Summer",
+        "racquetball": "Summer",
+        "rhythmic gymnastics": "Summer",
+        "ringette": "Winter",
+        "rowing": "Summer",
+        "rugby": "Summer",
+        "sailing": "Summer",
+        "shooting para sport": "Summer",
+        "sitting volleyball": "Summer",
+        "skateboard": "Summer",
+        "skeleton": "Winter",
+        "ski cross": "Winter",
+        "ski jumping": "Winter",
+        "skimboarding cross (test)": "Summer",
+        "snowboard": "Winter",
+        "soccer": "Summer",
+        "softball": "Summer",
+        "speed skating": "Winter",
+        "sport cheer": "Summer",
+        "sport climbing": "Summer",
+        "squash": "Summer",
+        "surfing": "Summer",
+        "swimming": "Summer",
+        "table tennis": "Summer",
+        "taekwondo": "Summer",
+        "tennis": "Summer",
+        "trampoline": "Summer",
+        "triathlon": "Summer",
+        "ultimate": "Summer",
+        "volleyball": "Summer",
+        "wakeboard": "Summer",
+        "water polo": "Summer",
+        "water ski": "Summer",
+        "weightlifting": "Summer",
+        "wheelchair athletics": "Summer",
+        "wheelchair basketball": "Summer",
+        "wheelchair curling": "Winter",
+        "wheelchair rugby": "Summer",
+        "wheelchair tennis": "Summer",
+        "wrestling": "Summer",
+    }
+
+    return season_by_sport.get(s, "")
 
 # -------------------------------------------------------------------------
 # NAME-MATCH PAIR FINDER
@@ -902,6 +1023,34 @@ app.layout = html.Div(
                         "cursor": "pointer",
                     },
                 ),
+                html.Button(
+                    "Download Mail Merge CSV",
+                    id="btn-dl-mailmerge",
+                    n_clicks=0,
+                    disabled=True,
+                    style={
+                        "padding": "0.45rem 1.2rem",
+                        "marginLeft": "0.8rem",
+                        "backgroundColor": "#1a6b3c",
+                        "color": "white",
+                        "border": "none",
+                        "cursor": "pointer",
+                    },
+                ),
+                html.Button(
+                    "Download National Inventory Data Set",
+                    id="btn-dl-national-inventory",
+                    n_clicks=0,
+                    disabled=True,
+                    style={
+                        "padding": "0.45rem 1.2rem",
+                        "marginLeft": "0.8rem",
+                        "backgroundColor": "#0a4f7a",
+                        "color": "white",
+                        "border": "none",
+                        "cursor": "pointer",
+                    },
+                ),
             ],
             style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "marginBottom": "1rem"},
         ),
@@ -941,6 +1090,8 @@ app.layout = html.Div(
         dcc.Download(id="csv-file-filtered"),
         dcc.Download(id="csv-file-pending-unmatched"),
         dcc.Download(id="csv-file-unclaimed-nominations"),
+        dcc.Download(id="csv-file-mailmerge"),
+        dcc.Download(id="csv-file-national-inventory"),
     ],
 )
 
@@ -983,6 +1134,8 @@ def fetch_columns_callback(_):
     Output("btn-dl-filter", "disabled"),
     Output("btn-dl-pending-unmatched", "disabled"),
     Output("btn-dl-unclaimed-nominations", "disabled"),
+    Output("btn-dl-mailmerge", "disabled"),
+    Output("btn-dl-national-inventory", "disabled"),
     Output("log", "children"),
     Output("loading-message", "children"),
     Output("column-select", "options"),
@@ -1002,6 +1155,8 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
         return (
             no_update,
             no_update,
+            True,
+            True,
             True,
             True,
             True,
@@ -1065,6 +1220,8 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
             True,
             True,
             True,
+            True,
+            True,
             "\n".join(log_lines),
             "No profiles found.",
             no_update,
@@ -1111,6 +1268,8 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
     return (
         df.to_dict("records"),
         columns,
+        False,
+        False,
         False,
         False,
         False,
@@ -1189,6 +1348,9 @@ def download_pending_unmatched(_):
         return no_update
 
     df_base = cached_df.copy()
+    df_base = remove_test_sports(df_base)
+    if df_base.empty:
+        return no_update
 
     # Exclude rows where nomination has already been claimed
     nomination_col = next(
@@ -1234,15 +1396,33 @@ def download_unclaimed_nominations(_):
         return no_update
 
     df_out = cached_df.copy()
+    df_out = remove_test_sports(df_out)
+    if df_out.empty:
+        return no_update
 
-    # Keep only rows where nomination claimed is explicitly True (redeemed=False means unclaimed)
-    nomination_col = next(
+    # Keep only rows where nomination_approved = True AND nomination_claimed = False
+    # Exclude rows where both values are blank
+    claimed_col = next(
         (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df_out.columns),
         None,
     )
-    if nomination_col:
-        s = df_out[nomination_col].fillna("").astype(str).str.strip().str.lower()
-        df_out = df_out[s == "false"]
+    approved_col = next(
+        (c for c in ["nomination_approved"] if c in df_out.columns),
+        None,
+    )
+
+    claimed_s = (
+        df_out[claimed_col].fillna("").astype(str).str.strip().str.lower()
+        if claimed_col else pd.Series("", index=df_out.index)
+    )
+    approved_s = (
+        df_out[approved_col].fillna("").astype(str).str.strip().str.lower()
+        if approved_col else pd.Series("", index=df_out.index)
+    )
+
+    both_blank = (claimed_s == "") & (approved_s == "")
+    mask = (~both_blank) & (claimed_s == "false") & (approved_s == "true")
+    df_out = df_out[mask]
 
     # Sort alphabetically by last name
     last_name_col = next(
@@ -1251,6 +1431,15 @@ def download_unclaimed_nominations(_):
     )
     if last_name_col:
         df_out = df_out.sort_values(by=last_name_col, ascending=True, key=lambda s: s.str.lower().fillna(""))
+
+    # Deduplicate by first + last name (keep first occurrence after sort)
+    first_name_col = next(
+        (c for c in ["first_name", "person.first_name", "First Name"] if c in df_out.columns),
+        None,
+    )
+    dedup_cols = [c for c in [first_name_col, last_name_col] if c]
+    if dedup_cols:
+        df_out = df_out.drop_duplicates(subset=dedup_cols, keep="first")
 
     # Fixed columns for this report
     unclaimed_cols = [
@@ -1270,6 +1459,180 @@ def download_unclaimed_nominations(_):
 
     filename = cached_name.replace(".csv", "_unclaimed_nominations.csv")
     return dcc.send_data_frame(df_out.to_csv, filename, index=False)
+
+
+@app.callback(
+    Output("csv-file-mailmerge", "data"),
+    Input("btn-dl-mailmerge", "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_mailmerge(_):
+    if cached_df.empty:
+        return no_update
+
+    df_out = cached_df.copy()
+    df_out = remove_test_sports(df_out)
+    if df_out.empty:
+        return no_update
+
+    # Same filter as unclaimed nominations
+    claimed_col = next(
+        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df_out.columns),
+        None,
+    )
+    approved_col = next(
+        (c for c in ["nomination_approved"] if c in df_out.columns),
+        None,
+    )
+
+    claimed_s = (
+        df_out[claimed_col].fillna("").astype(str).str.strip().str.lower()
+        if claimed_col else pd.Series("", index=df_out.index)
+    )
+    approved_s = (
+        df_out[approved_col].fillna("").astype(str).str.strip().str.lower()
+        if approved_col else pd.Series("", index=df_out.index)
+    )
+
+    both_blank = (claimed_s == "") & (approved_s == "")
+    mask = (~both_blank) & (claimed_s == "false") & (approved_s == "true")
+    df_out = df_out[mask]
+
+    # Sort by last name
+    last_name_col = next(
+        (c for c in ["last_name", "person.last_name", "Last Name"] if c in df_out.columns),
+        None,
+    )
+    if last_name_col:
+        df_out = df_out.sort_values(by=last_name_col, ascending=True, key=lambda s: s.str.lower().fillna(""))
+
+    # Deduplicate by first + last name
+    first_name_col = next(
+        (c for c in ["first_name", "person.first_name", "First Name"] if c in df_out.columns),
+        None,
+    )
+    dedup_cols = [c for c in [first_name_col, last_name_col] if c]
+    if dedup_cols:
+        df_out = df_out.drop_duplicates(subset=dedup_cols, keep="first")
+
+    if df_out.empty:
+        return no_update
+
+    # Determine "To" email: under 19 → guardian_email, 19+ → email
+    age_col = next((c for c in ["age"] if c in df_out.columns), None)
+    email_col = next((c for c in ["email"] if c in df_out.columns), None)
+    guardian_email_col = next((c for c in ["guardian_email"] if c in df_out.columns), None)
+
+    def get_to_email(row):
+        try:
+            age_num = float(str(row[age_col]).strip()) if age_col else None
+        except (ValueError, TypeError):
+            age_num = None
+        athlete_em = str(row[email_col] or "").strip() if email_col else ""
+        guardian_em = str(row[guardian_email_col] or "").strip() if guardian_email_col else ""
+        if age_num is not None and age_num < 19:
+            return guardian_em if guardian_em else athlete_em
+        return athlete_em if athlete_em else guardian_em
+
+    df_out["To"] = df_out.apply(get_to_email, axis=1)
+
+    # Build 3-column output
+    merge_data = {}
+    if first_name_col:
+        merge_data["First Name"] = df_out[first_name_col].values
+    if last_name_col:
+        merge_data["Last Name"] = df_out[last_name_col].values
+    merge_data["To"] = df_out["To"].values
+    df_merge = pd.DataFrame(merge_data)
+
+    # Split into chunks of max 450
+    CHUNK_SIZE = 450
+    chunks = [df_merge.iloc[i:i + CHUNK_SIZE] for i in range(0, len(df_merge), CHUNK_SIZE)]
+    base = cached_name.replace(".csv", "")
+
+    if len(chunks) == 1:
+        return dcc.send_data_frame(chunks[0].to_csv, f"{base}_mailmerge.csv", index=False)
+
+    # Multiple chunks → zip
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, chunk in enumerate(chunks, 1):
+            zf.writestr(f"{base}_mailmerge_part{i}.csv", chunk.to_csv(index=False).encode("utf-8"))
+    zip_buffer.seek(0)
+    return dcc.send_bytes(zip_buffer.read(), f"{base}_mailmerge.zip")
+
+
+@app.callback(
+    Output("csv-file-national-inventory", "data"),
+    Input("btn-dl-national-inventory", "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_national_inventory(_):
+    if cached_df.empty:
+        return no_update
+
+    df_out = cached_df.copy()
+    df_out = remove_test_sports(df_out)
+    if df_out.empty:
+        return no_update
+    df_out = add_level_category(df_out)
+
+    approved_col = next(
+        (c for c in ["nomination_approved", "current_nomination.approved"] if c in df_out.columns),
+        None,
+    )
+    if approved_col:
+        approved_s = df_out[approved_col].fillna("").astype(str).str.strip().str.lower()
+        df_out = df_out[approved_s == "true"]
+    else:
+        return no_update
+
+    if df_out.empty:
+        return no_update
+
+    dedup_fields = [
+        field for field in ["role", "first_name", "last_name", "sport"]
+        if field in df_out.columns
+    ]
+    if dedup_fields:
+        df_out = df_out.drop_duplicates(subset=dedup_fields, keep="first")
+
+    # Ensure season is populated from sport when missing/blank.
+    sport_col = next((c for c in ["sport", "Sport"] if c in df_out.columns), None)
+    season_col = next((c for c in ["season", "Season"] if c in df_out.columns), None)
+    if sport_col:
+        if season_col:
+            season_s = df_out[season_col].fillna("").astype(str).str.strip()
+            missing_season = season_s == ""
+            if missing_season.any():
+                df_out.loc[missing_season, season_col] = df_out.loc[missing_season, sport_col].apply(
+                    infer_season_from_sport
+                )
+        else:
+            df_out["season"] = df_out[sport_col].apply(infer_season_from_sport)
+
+    # Allow fallback aliases for fields that may differ by endpoint version.
+    field_aliases = {
+        "training_group": ["training_group", "training_groups", "training_group_name"],
+    }
+
+    selected = []
+    rename_map = {}
+    for target_field, target_label in NATIONAL_INVENTORY_COLUMNS:
+        candidates = field_aliases.get(target_field, [target_field])
+        actual = next((c for c in candidates if c in df_out.columns), None)
+        if actual:
+            selected.append(actual)
+            rename_map[actual] = target_label
+
+    if not selected:
+        return no_update
+
+    df_export = df_out[selected].copy()
+    df_export.rename(columns=rename_map, inplace=True)
+
+    filename = cached_name.replace(".csv", "_national_inventory_dataset.csv")
+    return dcc.send_data_frame(df_export.to_csv, filename, index=False)
 
 
 # Preview of the filtered CSV (first 10 rows, same logic as download)
