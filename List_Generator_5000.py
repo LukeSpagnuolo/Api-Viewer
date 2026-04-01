@@ -409,6 +409,13 @@ NATIONAL_INVENTORY_COLUMNS = [
 ]
 
 # -------------------------------------------------------------------------
+# ACTIVE ATHLETES – COLUMNS TO EXCLUDE
+# -------------------------------------------------------------------------
+ACTIVE_ATHLETES_EXCLUDE_KEYS = {
+    "profile_id", "nomination_id", "row_kind", "enrollment_id", "row_id",
+}
+
+# -------------------------------------------------------------------------
 # TEST SPORTS TO EXCLUDE FROM FILTERED DOWNLOAD
 # -------------------------------------------------------------------------
 TEST_SPORTS = {
@@ -416,6 +423,141 @@ TEST_SPORTS = {
     "Skimboarding Cross (TEST)",
 }
 TEST_SPORTS_NORMALIZED = {s.strip().lower() for s in TEST_SPORTS}
+
+SPORT_COLUMNS = [
+    "sport",
+    "nomination_sport_name",
+    "Sport",
+    "Nomination Sport Name",
+]
+
+# User-configurable LOU defaults (matched against normalized sport names).
+DEFAULT_LOU_SPORT_KEYS = {
+    "alpine ski",
+    "alpine skiing",
+    "para alpine ski",
+    "para alpine skiing",
+    "athletics",
+    "cycling",
+    "diving",
+    "freestyle ski",
+    "freestyle skiing",
+    "artistic gymnastics",
+    "rowing",
+    "rugby",
+    "sailing",
+    "skateboard",
+    "skateboarding",
+    "snowboard",
+    "soccer",
+    "swimming",
+    "triathlon",
+    "para triathlon",
+    "volleyball",
+    "wheelchair rugby",
+}
+
+DEFAULT_ENHANCED_EXCELLENCE_SPORT_KEYS = {
+    "alpine ski",
+    "alpine skiing",
+    "artistic swimming",
+    "athletics",
+    "diving",
+    "basketball",
+    "biathlon",
+    "artistic gymnastics",
+    "canoe/kayak",
+    "canoe kayak",
+    "cross country skiing",
+    "cross-country skiing",
+    "cross-country ski",
+    "curling",
+    "cycling",
+    "judo",
+    "rowing",
+    "field hockey",
+    "figure skating",
+    "freestyle skiing",
+    "freestyle ski",
+    "wheelchair athletics",
+    "wheelchair rugby",
+    "wheelchair tennis",
+    "wrestling",
+    "rugby",
+    "sailing",
+    "snowboard",
+    "swimming",
+    "triathlon",
+    "volleyball",
+    "wheelchair basketball",
+}
+
+def normalize_sport_name(value) -> str:
+    """Normalize sport text for stable comparisons."""
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def get_available_sport_columns(df: pd.DataFrame) -> list:
+    """Return sport-related columns that exist in the DataFrame."""
+    return [c for c in SPORT_COLUMNS if c in df.columns]
+
+
+def build_unique_sport_options(df: pd.DataFrame) -> list:
+    """Build sorted dropdown options from all unique sport values in the dataset."""
+    if df.empty:
+        return []
+
+    cols = get_available_sport_columns(df)
+    if not cols:
+        return []
+
+    labels_by_norm = {}
+    for col in cols:
+        series = df[col].dropna().astype(str).str.strip()
+        for val in series:
+            if not val or val.lower() == "nan":
+                continue
+            norm = normalize_sport_name(val)
+            if not norm:
+                continue
+            labels_by_norm.setdefault(norm, val)
+
+    return [
+        {"label": labels_by_norm[k], "value": labels_by_norm[k]}
+        for k in sorted(labels_by_norm, key=lambda x: labels_by_norm[x].lower())
+    ]
+
+
+def build_default_lou_sports(unique_sport_options: list) -> list:
+    """Pick default LOU sports from available options using normalized matching."""
+    defaults = []
+    for opt in unique_sport_options:
+        value = opt.get("value", "")
+        if normalize_sport_name(value) in DEFAULT_LOU_SPORT_KEYS:
+            defaults.append(value)
+    return defaults
+
+
+def build_default_enhanced_excellence_sports(unique_sport_options: list) -> list:
+    """Pick Enhanced Excellence defaults and include para counterparts when present."""
+    defaults = []
+    for opt in unique_sport_options:
+        value = opt.get("value", "")
+        norm = normalize_sport_name(value)
+
+        # Exact match against baseline Enhanced Excellence list.
+        if norm in DEFAULT_ENHANCED_EXCELLENCE_SPORT_KEYS:
+            defaults.append(value)
+            continue
+
+        # Include para variants automatically when the non-para sport is listed.
+        if norm.startswith("para "):
+            base = norm[5:].strip()
+            if base in DEFAULT_ENHANCED_EXCELLENCE_SPORT_KEYS:
+                defaults.append(value)
+
+    return defaults
+
 
 def remove_test_sports(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -425,15 +567,7 @@ def remove_test_sports(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    cols = [
-        c for c in [
-            "sport",
-            "nomination_sport_name",
-            "Sport",
-            "Nomination Sport Name",
-        ]
-        if c in df.columns
-    ]
+    cols = get_available_sport_columns(df)
     if not cols:
         return df
 
@@ -744,103 +878,368 @@ def apply_campus_filters(df, campus_val, birth_campus_val, current_campus_val):
 
     return out
 
+
+def apply_fiscal_year_filter(df: pd.DataFrame, fiscal_year_val: str) -> pd.DataFrame:
+    """Filter DataFrame by fiscal year when a specific fiscal year is selected."""
+    if df.empty or not fiscal_year_val:
+        return df
+
+    fy_cols = [c for c in ["nomination_fiscal_year", "fiscal_year", "Fiscal Year"] if c in df.columns]
+    if not fy_cols:
+        return df
+
+    target = str(fiscal_year_val).strip().lower()
+    mask = pd.Series(False, index=df.index)
+    for col in fy_cols:
+        s = df[col].fillna("").astype(str).str.strip().str.lower()
+        mask = mask | (s == target)
+
+    return df[mask]
+
+
+def build_report_guide_tab() -> html.Div:
+    """Build the explanatory tab that documents each export button and its rules."""
+    guide_md = """
+### Common rules
+
+- All download buttons use the data from the last successful **Fetch Rows** action.
+- The **Fiscal year** dropdown applies to every download action on the page.
+- Several exports remove test sports before writing the file.
+- When a report uses a fixed column set, extra columns from the API are ignored.
+
+### Fetch controls
+
+- **Fetch Columns**: loads the API's report-column definitions so you can choose which fields to request.
+- **Fetch Rows**: pulls the selected report rows from the API and fills the preview, filters, and download cache.
+
+### Download buttons
+
+#### Download CSV (full)
+
+- Pulls the cached data exactly as fetched, then applies the fiscal year filter only.
+- It does not remove test sports.
+- It does not apply campus, role, or column selection filters.
+
+#### Download Filtered CSV
+
+- Pulls the cached data and applies fiscal year, birth campus, current campus, role, and selected column filters.
+- Removes test sports.
+- Recalculates the `level_category` column before export.
+- Uses the selected export columns if any are chosen; otherwise it uses the full export column set.
+
+#### Download Pending Unmatched Report
+
+- Applies the fiscal year filter and removes test sports.
+- Keeps only rows where the profile side is pending.
+- Excludes rows where a nomination is already claimed.
+- Pairs profile and nomination rows when names are similar and sports are compatible.
+- Skips pairs that already look linked by matching email and guardian email.
+- Exports a fixed set of contact and status fields.
+
+#### Download Unclaimed Nominations
+
+- Applies the fiscal year filter and removes test sports.
+- Keeps rows where `nomination_approved` is true and `nomination_claimed` is false.
+- Drops rows where both approved and claimed are blank.
+- Sorts by last name and removes duplicates using first name plus last name.
+- Exports a fixed nomination contact list.
+
+#### Download Mail Merge CSV
+
+- Uses the same base filter as **Unclaimed Nominations**.
+- Sorts by last name and removes duplicates using first name plus last name.
+- Builds a `To` field that uses guardian email for athletes under 19, otherwise athlete email.
+- Exports first name, last name, and recipient email.
+- Splits into multiple files inside a ZIP if the result exceeds 450 rows.
+
+#### Download National Inventory Data Set
+
+- Applies the fiscal year filter and removes test sports.
+- Keeps only rows where `nomination_approved` is true.
+- Removes duplicate rows using role, name, sport, and nomination status fields when available.
+- Fills missing season values from sport names.
+- Exports only the national inventory fields defined in the page.
+
+#### Download Active Athletes
+
+- Applies the fiscal year filter and removes test sports.
+- Keeps only rows where `nomination_claimed` is true.
+- Removes internal IDs and other excluded keys.
+- Exports the configured active-athlete column set plus any remaining non-excluded fields.
+"""
+
+    return html.Div(
+        style={
+            "maxWidth": "980px",
+            "marginTop": "1rem",
+            "padding": "1rem 1.1rem",
+            "backgroundColor": "#ffffff",
+            "border": "1px solid #d9e2ec",
+            "borderRadius": "10px",
+            "boxShadow": "0 1px 3px rgba(0, 0, 0, 0.04)",
+        },
+        children=[
+            html.H2(
+                "Report Guide",
+                style={"marginTop": "0", "marginBottom": "0.6rem", "color": "#003366"},
+            ),
+            dcc.Markdown(guide_md, style={"fontSize": "0.95rem", "lineHeight": "1.55"}),
+        ],
+    )
+
 # -------------------------------------------------------------------------
 # LAYOUT
 # -------------------------------------------------------------------------
 app.layout = html.Div(
     style={"fontFamily": "Arial", "margin": "2rem"},
     children=[
-        # Title & subtitle
-        html.H1(
-            "List Generator 5000",
-            style={
-                "marginBottom": "0.1rem",
-                "fontSize": "2rem",
-                "color": "#003366",
-            },
-        ),
-        html.Div(
-            "Campus filter options",
-            style={
-                "marginBottom": "1rem",
-                "fontSize": "0.95rem",
-                "color": "#555555",
-            },
-        ),
-
-        # Fetch Columns button + column selector + Fetch Rows button
-        html.Div(
-            [
-                html.Button(
-                    "Fetch Columns",
-                    id="btn-fetch-columns",
-                    style={
-                        "padding": "0.45rem 1.2rem",
-                        "height": "40px",
-                        "whiteSpace": "nowrap",
-                    },
+        dcc.Tabs(
+            id="page-tabs",
+            value="tab-exports",
+            children=[
+                dcc.Tab(
+                    label="Exports",
+                    value="tab-exports",
+                    style={"padding": "0.8rem 1rem", "fontWeight": "bold"},
+                    selected_style={"padding": "0.8rem 1rem", "fontWeight": "bold", "borderTop": "3px solid #0072B2"},
                 ),
-                dcc.Dropdown(
-                    id="fetch-columns-select",
-                    options=[],
-                    value=[],
-                    multi=True,
-                    placeholder="Click ‘Fetch Columns’ first, then choose which columns to include…",
-                    style={"flex": "1", "minWidth": "200px", "marginLeft": "0.6rem", "marginRight": "0.6rem"},
-                ),
-                html.Button(
-                    "Fetch Rows",
-                    id="btn-fetch-rows",
-                    style={
-                        "padding": "0.45rem 1.2rem",
-                        "height": "40px",
-                        "whiteSpace": "nowrap",
-                        "backgroundColor": "#0072B2",
-                        "color": "white",
-                        "border": "none",
-                        "cursor": "pointer",
-                    },
+                dcc.Tab(
+                    label="Report Guide",
+                    value="tab-guide",
+                    style={"padding": "0.8rem 1rem", "fontWeight": "bold"},
+                    selected_style={"padding": "0.8rem 1rem", "fontWeight": "bold", "borderTop": "3px solid #0072B2"},
                 ),
             ],
-            style={
-                "display": "flex",
-                "alignItems": "center",
-                "flexWrap": "wrap",
-                "marginBottom": "0.3rem",
-            },
+            style={"marginBottom": "1rem"},
         ),
         html.Div(
-            id="col-fetch-status",
-            style={"marginBottom": "1rem", "fontSize": "0.85rem", "color": "#555"},
-        ),
-
-        # Data preview section (loading + main preview table)
-        dcc.Loading(
-            id="loading-spinner",
-            type="circle",
-            color="#0072B2",
-            fullscreen=True,
+            id="export-tab-content",
             children=[
-                html.Div(
-                    id="loading-message",
+                # Title & subtitle
+                html.H1(
+                    "List Generator 5000",
                     style={
-                        "textAlign": "center",
-                        "fontWeight": "bold",
-                        "color": "#0072B2",
-                        "marginTop": "0.5rem",
-                        "fontSize": "1rem",
+                        "marginBottom": "0.1rem",
+                        "fontSize": "2rem",
+                        "color": "#003366",
+                    },
+                ),
+                html.Div(
+                    "Campus filter options",
+                    style={
+                        "marginBottom": "1rem",
+                        "fontSize": "0.95rem",
+                        "color": "#555555",
+                    },
+                ),
+
+                # Fetch Columns button + column selector + Fetch Rows button
+                html.Div(
+                    [
+                        html.Button(
+                            "Fetch Columns",
+                            id="btn-fetch-columns",
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "height": "40px",
+                                "whiteSpace": "nowrap",
+                            },
+                        ),
+                        dcc.Dropdown(
+                            id="fetch-columns-select",
+                            options=[],
+                            value=[],
+                            multi=True,
+                            placeholder="Click ‘Fetch Columns’ first, then choose which columns to include…",
+                            style={"flex": "1", "minWidth": "200px", "marginLeft": "0.6rem", "marginRight": "0.6rem"},
+                        ),
+                        html.Button(
+                            "Fetch Rows",
+                            id="btn-fetch-rows",
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "height": "40px",
+                                "whiteSpace": "nowrap",
+                                "backgroundColor": "#0072B2",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                    ],
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "flexWrap": "wrap",
+                        "marginBottom": "0.3rem",
+                    },
+                ),
+                html.Div(
+                    id="col-fetch-status",
+                    style={"marginBottom": "1rem", "fontSize": "0.85rem", "color": "#555"},
+                ),
+
+                # Data preview section (loading + main preview table)
+                dcc.Loading(
+                    id="loading-spinner",
+                    type="circle",
+                    color="#0072B2",
+                    fullscreen=True,
+                    children=[
+                        html.Div(
+                            id="loading-message",
+                            style={
+                                "textAlign": "center",
+                                "fontWeight": "bold",
+                                "color": "#0072B2",
+                                "marginTop": "0.5rem",
+                                "fontSize": "1rem",
+                            },
+                        ),
+                        dash_table.DataTable(
+                            id="preview",
+                            page_size=10,   # 10 rows per page for fetched profiles
+                            style_table={
+                                "overflowX": "auto",
+                                "marginTop": "0.8rem",
+                                "width": "100%",
+                            },
+                            style_header={
+                                "backgroundColor": "#0072B2",
+                                "color": "white",
+                                "fontWeight": "bold",
+                            },
+                            style_cell={
+                                "textAlign": "left",
+                                "fontSize": "0.8rem",
+                                "padding": "5px",
+                            },
+                            style_data_conditional=[
+                                {
+                                    "if": {"row_index": "odd"},
+                                    "backgroundColor": "#f9f9f9",
+                                }
+                            ],
+                        ),
+                    ],
+                ),
+
+                # Download options section
+                html.Hr(style={"marginTop": "1.8rem", "marginBottom": "1rem"}),
+                html.H3(
+                    "Download options",
+                    style={
+                        "marginBottom": "0.4rem",
+                        "fontSize": "1.2rem",
+                        "color": "#003366",
+                    },
+                ),
+
+                # Download filters (campus + role)
+                html.Div(
+                    [
+                        dcc.Dropdown(
+                            id="fiscal-year-dd",
+                            options=[{"label": "(all fiscal years)", "value": ""}],
+                            value="",
+                            placeholder="Filter: fiscal year",
+                            style={"width": "220px"},
+                        ),
+                        dcc.Dropdown(
+                            id="birth-campus-dd",
+                            options=[{"label": "(all birth campuses)", "value": ""}],
+                            value="",
+                            placeholder="Filter: birth city campus",
+                            style={"width": "260px", "marginLeft": "0.6rem"},
+                        ),
+                        dcc.Dropdown(
+                            id="current-campus-dd",
+                            options=[{"label": "(all current campuses)", "value": ""}],
+                            value="",
+                            placeholder="Filter: residence campus",
+                            style={"width": "260px", "marginLeft": "0.6rem"},
+                        ),
+                        dcc.Dropdown(
+                            id="role-dd",
+                            options=ROLE_OPTS,
+                            value="",
+                            placeholder="Filter: role",
+                            style={"width": "160px", "marginLeft": "0.6rem"},
+                        ),
+                    ],
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "flexWrap": "wrap",
+                        "marginBottom": "1rem",
+                    },
+                ),
+
+                html.Details(
+                    [
+                        html.Summary(
+                            "LOU sports selector",
+                            style={"cursor": "pointer", "fontSize": "0.9rem", "color": "#555", "fontWeight": "bold"},
+                        ),
+                        html.Div(
+                            "Toggle which sports count as LOU",
+                            style={"marginTop": "0.6rem", "marginBottom": "0.4rem", "fontSize": "0.85rem", "color": "#555555"},
+                        ),
+                        dcc.Dropdown(
+                            id="lou-sports-dd",
+                            options=[],
+                            value=[],
+                            multi=True,
+                            placeholder="LOU sports (auto-filled from unique sports)",
+                            style={"width": "100%", "marginBottom": "0.2rem"},
+                        ),
+                    ],
+                    open=False,
+                    style={"marginBottom": "0.9rem"},
+                ),
+
+                html.Details(
+                    [
+                        html.Summary(
+                            "Enhanced Excellence sport selector",
+                            style={"cursor": "pointer", "fontSize": "0.9rem", "color": "#555", "fontWeight": "bold"},
+                        ),
+                        html.Div(
+                            "Toggle which sports count as Enhanced Excellence",
+                            style={"marginTop": "0.6rem", "marginBottom": "0.4rem", "fontSize": "0.85rem", "color": "#555555"},
+                        ),
+                        dcc.Dropdown(
+                            id="enhanced-excellence-sports-dd",
+                            options=[],
+                            value=[],
+                            multi=True,
+                            placeholder="Enhanced Excellence sports (auto-filled from unique sports)",
+                            style={"width": "100%", "marginBottom": "0.2rem"},
+                        ),
+                    ],
+                    open=False,
+                    style={"marginBottom": "0.9rem"},
+                ),
+
+                # Filtered CSV preview
+                html.Div(
+                    "Filtered CSV preview (first 10 rows)",
+                    style={
+                        "marginBottom": "0.4rem",
+                        "fontSize": "0.9rem",
+                        "color": "#555555",
                     },
                 ),
                 dash_table.DataTable(
-                    id="preview",
-                    page_size=10,   # 10 rows per page for fetched profiles
+                    id="filtered-preview",
+                    page_size=10,   # 10 rows per page for filtered preview
                     style_table={
                         "overflowX": "auto",
-                        "marginTop": "0.8rem",
+                        "marginBottom": "0.8rem",
                         "width": "100%",
                     },
                     style_header={
-                        "backgroundColor": "#0072B2",
+                        "backgroundColor": "#444444",
                         "color": "white",
                         "fontWeight": "bold",
                     },
@@ -856,244 +1255,198 @@ app.layout = html.Div(
                         }
                     ],
                 ),
-            ],
-        ),
 
-        # Download options section
-        html.Hr(style={"marginTop": "1.8rem", "marginBottom": "1rem"}),
-        html.H3(
-            "Download options",
-            style={
-                "marginBottom": "0.4rem",
-                "fontSize": "1.2rem",
-                "color": "#003366",
-            },
-        ),
-
-        # Download filters (campus + role)
-        html.Div(
-            [
-                dcc.Dropdown(
-                    id="birth-campus-dd",
-                    options=[{"label": "(all birth campuses)", "value": ""}],
-                    value="",
-                    placeholder="Filter: birth city campus",
-                    style={"width": "260px"},
-                ),
-                dcc.Dropdown(
-                    id="current-campus-dd",
-                    options=[{"label": "(all current campuses)", "value": ""}],
-                    value="",
-                    placeholder="Filter: residence campus",
-                    style={"width": "260px", "marginLeft": "0.6rem"},
-                ),
-                dcc.Dropdown(
-                    id="role-dd",
-                    options=ROLE_OPTS,
-                    value="",
-                    placeholder="Filter: role",
-                    style={"width": "160px", "marginLeft": "0.6rem"},
-                ),
-            ],
-            style={
-                "display": "flex",
-                "alignItems": "center",
-                "flexWrap": "wrap",
-                "marginBottom": "1rem",
-            },
-        ),
-
-        # Filtered CSV preview
-        html.Div(
-            "Filtered CSV preview (first 10 rows)",
-            style={
-                "marginBottom": "0.4rem",
-                "fontSize": "0.9rem",
-                "color": "#555555",
-            },
-        ),
-        dash_table.DataTable(
-            id="filtered-preview",
-            page_size=10,   # 10 rows per page for filtered preview
-            style_table={
-                "overflowX": "auto",
-                "marginBottom": "0.8rem",
-                "width": "100%",
-            },
-            style_header={
-                "backgroundColor": "#444444",
-                "color": "white",
-                "fontWeight": "bold",
-            },
-            style_cell={
-                "textAlign": "left",
-                "fontSize": "0.8rem",
-                "padding": "5px",
-            },
-            style_data_conditional=[
-                {
-                    "if": {"row_index": "odd"},
-                    "backgroundColor": "#f9f9f9",
-                }
-            ],
-        ),
-
-        # Download buttons
-        html.Div(
-            [
-                html.Button(
-                    "Download CSV (full)",
-                    id="btn-dl",
-                    n_clicks=0,
-                    disabled=True,
-                    style={
-                        "padding": "0.45rem 1.2rem",
-                        "marginRight": "0.8rem",
-                    },
-                ),
-                html.Button(
-                    "Download Filtered CSV",
-                    id="btn-dl-filter",
-                    n_clicks=0,
-                    disabled=True,
-                    style={
-                        "padding": "0.45rem 1.2rem",
-                        "backgroundColor": "#e0e0e0",
-                    },
-                ),
-            ],
-            style={
-                "display": "flex",
-                "alignItems": "center",
-                "flexWrap": "wrap",
-                "marginBottom": "0.7rem",
-            },
-        ),
-
-        # Column multiselect for filtered CSV (full width)
-        html.Div(
-            [
-                dcc.Dropdown(
-                    id="column-select",
-                    options=[
-                        {"label": label, "value": field}
-                        for field, label in EXPORT_COLUMNS
+                # Download buttons
+                html.Div(
+                    [
+                        html.Button(
+                            "Download CSV (full)",
+                            id="btn-dl",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "marginRight": "0.8rem",
+                            },
+                        ),
+                        html.Button(
+                            "Download Filtered CSV",
+                            id="btn-dl-filter",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "backgroundColor": "#e0e0e0",
+                            },
+                        ),
                     ],
-                    value=[field for field, _ in EXPORT_COLUMNS],  # default: all
-                    multi=True,
-                    placeholder="Select columns for filtered CSV",
-                    style={"width": "100%"},
-                )
-            ],
-            style={"marginBottom": "0.6rem"},
-        ),
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "flexWrap": "wrap",
+                        "marginBottom": "0.7rem",
+                    },
+                ),
 
-        # ── Prebuilt Reports ──────────────────────────────────────────────
-        html.Hr(style={"marginTop": "1.8rem", "marginBottom": "1rem"}),
-        html.H3(
-            "Prebuilt Reports",
-            style={"marginBottom": "0.4rem", "fontSize": "1.2rem", "color": "#003366"},
-        ),
-        html.Div(
-            [
-                html.Button(
-                    "Download Pending Unmatched Report",
-                    id="btn-dl-pending-unmatched",
-                    n_clicks=0,
-                    disabled=True,
-                    style={
-                        "padding": "0.45rem 1.2rem",
-                        "backgroundColor": "#5c2d91",
-                        "color": "white",
-                        "border": "none",
-                        "cursor": "pointer",
-                    },
+                # Column multiselect for filtered CSV (full width)
+                html.Div(
+                    [
+                        dcc.Dropdown(
+                            id="column-select",
+                            options=[
+                                {"label": label, "value": field}
+                                for field, label in EXPORT_COLUMNS
+                            ],
+                            value=[field for field, _ in EXPORT_COLUMNS],  # default: all
+                            multi=True,
+                            placeholder="Select columns for filtered CSV",
+                            style={"width": "100%"},
+                        )
+                    ],
+                    style={"marginBottom": "0.6rem"},
                 ),
-                html.Button(
-                    "Download Unclaimed Nominations",
-                    id="btn-dl-unclaimed-nominations",
-                    n_clicks=0,
-                    disabled=True,
-                    style={
-                        "padding": "0.45rem 1.2rem",
-                        "marginLeft": "0.8rem",
-                        "backgroundColor": "#b83c00",
-                        "color": "white",
-                        "border": "none",
-                        "cursor": "pointer",
-                    },
-                ),
-                html.Button(
-                    "Download Mail Merge CSV",
-                    id="btn-dl-mailmerge",
-                    n_clicks=0,
-                    disabled=True,
-                    style={
-                        "padding": "0.45rem 1.2rem",
-                        "marginLeft": "0.8rem",
-                        "backgroundColor": "#1a6b3c",
-                        "color": "white",
-                        "border": "none",
-                        "cursor": "pointer",
-                    },
-                ),
-                html.Button(
-                    "Download National Inventory Data Set",
-                    id="btn-dl-national-inventory",
-                    n_clicks=0,
-                    disabled=True,
-                    style={
-                        "padding": "0.45rem 1.2rem",
-                        "marginLeft": "0.8rem",
-                        "backgroundColor": "#0a4f7a",
-                        "color": "white",
-                        "border": "none",
-                        "cursor": "pointer",
-                    },
-                ),
-            ],
-            style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "marginBottom": "1rem"},
-        ),
 
-        # Collapsible technical log at the very bottom
-        html.Details(
-            [
-                html.Summary(
-                    "Technical request log (advanced)",
+                # ── Prebuilt Reports ──────────────────────────────────────────────
+                html.Hr(style={"marginTop": "1.8rem", "marginBottom": "1rem"}),
+                html.H3(
+                    "Prebuilt Reports",
+                    style={"marginBottom": "0.4rem", "fontSize": "1.2rem", "color": "#003366"},
+                ),
+                html.Div(
+                    [
+                        html.Button(
+                            "Download Pending Unmatched Report",
+                            id="btn-dl-pending-unmatched",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "backgroundColor": "#5c2d91",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Button(
+                            "Download Unclaimed Nominations",
+                            id="btn-dl-unclaimed-nominations",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "marginLeft": "0.8rem",
+                                "backgroundColor": "#b83c00",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Button(
+                            "Download Mail Merge CSV",
+                            id="btn-dl-mailmerge",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "marginLeft": "0.8rem",
+                                "backgroundColor": "#1a6b3c",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Button(
+                            "Download National Inventory Data Set",
+                            id="btn-dl-national-inventory",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "marginLeft": "0.8rem",
+                                "backgroundColor": "#0a4f7a",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Button(
+                            "Download Active Athletes",
+                            id="btn-dl-active-athletes",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "marginLeft": "0.8rem",
+                                "backgroundColor": "#2e7d32",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                    ],
                     style={
-                        "cursor": "pointer",
-                        "fontSize": "0.9rem",
-                        "color": "#555",
-                        "fontWeight": "bold",
+                        "display": "flex",
+                        "alignItems": "center",
+                        "flexWrap": "wrap",
+                        "rowGap": "0.6rem",
+                        "marginBottom": "1rem",
                     },
                 ),
-                html.Pre(
-                    id="log",
-                    style={
-                        "whiteSpace": "pre-wrap",
-                        "background": "#f7f7f7",
-                        "height": "25vh",
-                        "overflow": "auto",
-                        "padding": "0.7rem",
-                        "fontSize": "0.8rem",
-                        "border": "1px solid #ddd",
-                        "marginTop": "0.8rem",
-                    },
-                ),
-            ],
-            open=False,
-            style={"marginTop": "1.0rem"},
-        ),
 
-        dcc.Store(id="col-defs-store", data=[]),
-        dcc.Download(id="csv-file"),
-        dcc.Download(id="csv-file-filtered"),
-        dcc.Download(id="csv-file-pending-unmatched"),
-        dcc.Download(id="csv-file-unclaimed-nominations"),
-        dcc.Download(id="csv-file-mailmerge"),
-        dcc.Download(id="csv-file-national-inventory"),
+                # Collapsible technical log at the very bottom
+                html.Details(
+                    [
+                        html.Summary(
+                            "Technical request log (advanced)",
+                            style={
+                                "cursor": "pointer",
+                                "fontSize": "0.9rem",
+                                "color": "#555",
+                                "fontWeight": "bold",
+                            },
+                        ),
+                        html.Pre(
+                            id="log",
+                            style={
+                                "whiteSpace": "pre-wrap",
+                                "background": "#f7f7f7",
+                                "height": "25vh",
+                                "overflow": "auto",
+                                "padding": "0.7rem",
+                                "fontSize": "0.8rem",
+                                "border": "1px solid #ddd",
+                                "marginTop": "0.8rem",
+                            },
+                        ),
+                    ],
+                    open=False,
+                    style={"marginTop": "1.0rem"},
+                ),
+
+                dcc.Store(id="col-defs-store", data=[]),
+                dcc.Download(id="csv-file"),
+                dcc.Download(id="csv-file-filtered"),
+                dcc.Download(id="csv-file-pending-unmatched"),
+                dcc.Download(id="csv-file-unclaimed-nominations"),
+                dcc.Download(id="csv-file-mailmerge"),
+                dcc.Download(id="csv-file-national-inventory"),
+                dcc.Download(id="csv-file-active-athletes"),
+            ],
+        ),
+        html.Div(id="guide-tab-content", children=build_report_guide_tab(), style={"display": "none"}),
     ],
 )
+
+
+@app.callback(
+    Output("export-tab-content", "style"),
+    Output("guide-tab-content", "style"),
+    Input("page-tabs", "value"),
+)
+def switch_page_tab(tab_value):
+    if tab_value == "tab-guide":
+        return {"display": "none"}, {"display": "block"}
+    return {"display": "block"}, {"display": "none"}
 
 # -------------------------------------------------------------------------
 # CALLBACKS
@@ -1136,14 +1489,21 @@ def fetch_columns_callback(_):
     Output("btn-dl-unclaimed-nominations", "disabled"),
     Output("btn-dl-mailmerge", "disabled"),
     Output("btn-dl-national-inventory", "disabled"),
+    Output("btn-dl-active-athletes", "disabled"),
     Output("log", "children"),
     Output("loading-message", "children"),
     Output("column-select", "options"),
     Output("column-select", "value"),
+    Output("fiscal-year-dd", "options"),
+    Output("fiscal-year-dd", "value"),
     Output("birth-campus-dd", "options"),
     Output("birth-campus-dd", "value"),
     Output("current-campus-dd", "options"),
     Output("current-campus-dd", "value"),
+    Output("lou-sports-dd", "options"),
+    Output("lou-sports-dd", "value"),
+    Output("enhanced-excellence-sports-dd", "options"),
+    Output("enhanced-excellence-sports-dd", "value"),
     Input("btn-fetch-rows", "n_clicks"),
     State("fetch-columns-select", "value"),
     State("col-defs-store", "data"),
@@ -1161,8 +1521,15 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
             True,
             True,
             True,
+            True,
             "No OAuth token – log in.",
             "",
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
             no_update,
             no_update,
             no_update,
@@ -1222,8 +1589,15 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
             True,
             True,
             True,
+            True,
             "\n".join(log_lines),
             "No profiles found.",
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
             no_update,
             no_update,
             no_update,
@@ -1253,6 +1627,13 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
     ]
     col_values = [field for field, _ in ACTIVE_EXPORT_COLUMNS]
 
+    # Build fiscal year options from the full cached df
+    fiscal_year_options = [{"label": "(all fiscal years)", "value": ""}]
+    fy_col = next((c for c in ["nomination_fiscal_year", "fiscal_year", "Fiscal Year"] if c in df.columns), None)
+    if fy_col:
+        fy_vals = sorted(v for v in df[fy_col].dropna().astype(str).str.strip().unique() if v and v != "nan")
+        fiscal_year_options += [{"label": v, "value": v} for v in fy_vals]
+
     # Build birth city campus options from the full cached df
     birth_campus_options = [{"label": "(all birth campuses)", "value": ""}]
     if "birth_city_campus" in df.columns:
@@ -1265,9 +1646,15 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
         rvals = sorted(v for v in df["residence_city_campus"].dropna().astype(str).unique() if v and v != "nan")
         res_campus_options += [{"label": v, "value": v} for v in rvals]
 
+    lou_sport_options = build_unique_sport_options(df)
+    lou_sport_values = build_default_lou_sports(lou_sport_options)
+    ee_sport_options = lou_sport_options
+    ee_sport_values = build_default_enhanced_excellence_sports(ee_sport_options)
+
     return (
         df.to_dict("records"),
         columns,
+        False,
         False,
         False,
         False,
@@ -1278,21 +1665,33 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
         loading_msg,
         col_options,
         col_values,
+        fiscal_year_options,
+        "",   # reset fiscal year filter
         birth_campus_options,
         "",   # reset birth campus filter
         res_campus_options,
         "",   # reset current campus filter
+        lou_sport_options,
+        lou_sport_values,
+        ee_sport_options,
+        ee_sport_values,
     )
 
 @app.callback(
     Output("csv-file", "data"),
     Input("btn-dl", "n_clicks"),
+    State("fiscal-year-dd", "value"),
     prevent_initial_call=True,
 )
-def download_csv(_):
+def download_csv(_, fiscal_year_val):
     if cached_df.empty:
         return no_update
-    return dcc.send_data_frame(cached_df.to_csv, cached_name, index=False)
+
+    df_out = apply_fiscal_year_filter(cached_df, fiscal_year_val)
+    if df_out.empty:
+        return no_update
+
+    return dcc.send_data_frame(df_out.to_csv, cached_name, index=False)
 
 @app.callback(
     Output("csv-file-filtered", "data"),
@@ -1301,10 +1700,16 @@ def download_csv(_):
     State("current-campus-dd", "value"),
     State("role-dd", "value"),
     State("column-select", "value"),
+    State("fiscal-year-dd", "value"),
     prevent_initial_call=True,
 )
 def download_filtered_csv(
-    _, birth_campus_val, current_campus_val, role_val, selected_fields
+    _,
+    birth_campus_val,
+    current_campus_val,
+    role_val,
+    selected_fields,
+    fiscal_year_val,
 ):
     if cached_df.empty:
         return no_update
@@ -1312,6 +1717,7 @@ def download_filtered_csv(
     df_out = apply_campus_filters(
         cached_df, None, birth_campus_val, current_campus_val
     )
+    df_out = apply_fiscal_year_filter(df_out, fiscal_year_val)
 
     if role_val and "role" in df_out.columns:
         df_out = df_out[df_out["role"].str.lower() == role_val.lower()]
@@ -1341,13 +1747,15 @@ def download_filtered_csv(
 @app.callback(
     Output("csv-file-pending-unmatched", "data"),
     Input("btn-dl-pending-unmatched", "n_clicks"),
+    State("fiscal-year-dd", "value"),
     prevent_initial_call=True,
 )
-def download_pending_unmatched(_):
+def download_pending_unmatched(_, fiscal_year_val):
     if cached_df.empty:
         return no_update
 
     df_base = cached_df.copy()
+    df_base = apply_fiscal_year_filter(df_base, fiscal_year_val)
     df_base = remove_test_sports(df_base)
     if df_base.empty:
         return no_update
@@ -1389,13 +1797,15 @@ def download_pending_unmatched(_):
 @app.callback(
     Output("csv-file-unclaimed-nominations", "data"),
     Input("btn-dl-unclaimed-nominations", "n_clicks"),
+    State("fiscal-year-dd", "value"),
     prevent_initial_call=True,
 )
-def download_unclaimed_nominations(_):
+def download_unclaimed_nominations(_, fiscal_year_val):
     if cached_df.empty:
         return no_update
 
     df_out = cached_df.copy()
+    df_out = apply_fiscal_year_filter(df_out, fiscal_year_val)
     df_out = remove_test_sports(df_out)
     if df_out.empty:
         return no_update
@@ -1464,13 +1874,15 @@ def download_unclaimed_nominations(_):
 @app.callback(
     Output("csv-file-mailmerge", "data"),
     Input("btn-dl-mailmerge", "n_clicks"),
+    State("fiscal-year-dd", "value"),
     prevent_initial_call=True,
 )
-def download_mailmerge(_):
+def download_mailmerge(_, fiscal_year_val):
     if cached_df.empty:
         return no_update
 
     df_out = cached_df.copy()
+    df_out = apply_fiscal_year_filter(df_out, fiscal_year_val)
     df_out = remove_test_sports(df_out)
     if df_out.empty:
         return no_update
@@ -1565,13 +1977,15 @@ def download_mailmerge(_):
 @app.callback(
     Output("csv-file-national-inventory", "data"),
     Input("btn-dl-national-inventory", "n_clicks"),
+    State("fiscal-year-dd", "value"),
     prevent_initial_call=True,
 )
-def download_national_inventory(_):
+def download_national_inventory(_, fiscal_year_val):
     if cached_df.empty:
         return no_update
 
     df_out = cached_df.copy()
+    df_out = apply_fiscal_year_filter(df_out, fiscal_year_val)
     df_out = remove_test_sports(df_out)
     if df_out.empty:
         return no_update
@@ -1591,7 +2005,7 @@ def download_national_inventory(_):
         return no_update
 
     dedup_fields = [
-        field for field in ["role", "first_name", "last_name", "sport"]
+        field for field in ["role", "first_name", "last_name", "sport", "nomination_claimed", "current_nomination.redeemed"]
         if field in df_out.columns
     ]
     if dedup_fields:
@@ -1639,12 +2053,14 @@ def download_national_inventory(_):
 @app.callback(
     Output("filtered-preview", "data"),
     Output("filtered-preview", "columns"),
+    Input("fiscal-year-dd", "value"),
     Input("birth-campus-dd", "value"),
     Input("current-campus-dd", "value"),
     Input("role-dd", "value"),
     Input("column-select", "value"),
 )
 def update_filtered_preview(
+    fiscal_year_val,
     birth_campus_val,
     current_campus_val,
     role_val,
@@ -1656,6 +2072,7 @@ def update_filtered_preview(
     df_out = apply_campus_filters(
         cached_df, None, birth_campus_val, current_campus_val
     )
+    df_out = apply_fiscal_year_filter(df_out, fiscal_year_val)
 
     if role_val and "role" in df_out.columns:
         df_out = df_out[df_out["role"].str.lower() == role_val.lower()]
@@ -1689,6 +2106,63 @@ def update_filtered_preview(
     data = df_preview.to_dict("records")
 
     return data, columns
+
+@app.callback(
+    Output("csv-file-active-athletes", "data"),
+    Input("btn-dl-active-athletes", "n_clicks"),
+    State("fiscal-year-dd", "value"),
+    prevent_initial_call=True,
+)
+def download_active_athletes(_, fiscal_year_val):
+    if cached_df.empty:
+        return no_update
+
+    df_out = cached_df.copy()
+    df_out = apply_fiscal_year_filter(df_out, fiscal_year_val)
+
+    # Remove test sports
+    df_out = remove_test_sports(df_out)
+    if df_out.empty:
+        return no_update
+
+    df_out = add_level_category(df_out)
+
+    # Keep only rows where nomination_claimed is True
+    claimed_col = next(
+        (c for c in ["nomination_claimed", "current_nomination.redeemed"] if c in df_out.columns),
+        None,
+    )
+    if claimed_col:
+        claimed_s = df_out[claimed_col].fillna("").astype(str).str.strip().str.lower()
+        df_out = df_out[claimed_s == "true"]
+
+    if df_out.empty:
+        return no_update
+
+    # Build ordered column list using ACTIVE_EXPORT_COLUMNS, excluding unwanted keys
+    ordered_fields = [
+        field for field, _ in ACTIVE_EXPORT_COLUMNS
+        if field in df_out.columns and field not in ACTIVE_ATHLETES_EXCLUDE_KEYS
+    ]
+    # Append any remaining columns not in ACTIVE_EXPORT_COLUMNS (also excluding unwanted)
+    extra_fields = [
+        c for c in df_out.columns
+        if c not in ordered_fields and c not in ACTIVE_ATHLETES_EXCLUDE_KEYS
+    ]
+    fields = ordered_fields + extra_fields
+
+    if not fields:
+        return no_update
+
+    df_export = df_out[fields].copy()
+
+    # Rename to pretty labels
+    rename_map = {f: ACTIVE_FIELD_TO_LABEL.get(f, f) for f in fields}
+    df_export.rename(columns=rename_map, inplace=True)
+
+    filename = cached_name.replace(".csv", "_active_athletes.csv")
+    return dcc.send_data_frame(df_export.to_csv, filename, index=False)
+
 
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
