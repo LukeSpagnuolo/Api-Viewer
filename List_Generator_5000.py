@@ -562,6 +562,7 @@ def build_default_enhanced_excellence_sports(unique_sport_options: list) -> list
 VIASPORT_FIXED_FISCAL_YEAR = "2025-2026"
 VIASPORT_TRUE_VALUES = {"true", "1", "yes", "y"}
 VIASPORT_PERSON_ID_CANDIDATES = ["person_id", "profile_id", "id", "person.id", "profile.id"]
+VIASPORT_NOMINATION_ID_CANDIDATES = ["nomination_id", "current_nomination.id", "Nomination ID"]
 VIASPORT_FIRST_NAME_CANDIDATES = ["first_name", "person.first_name", "First Name"]
 VIASPORT_LAST_NAME_CANDIDATES = ["last_name", "person.last_name", "Last Name"]
 VIASPORT_SPORT_CANDIDATES = ["sport", "nomination_sport_name", "Sport", "Nomination Sport Name"]
@@ -665,7 +666,7 @@ def build_viasport_high_performance_export(df: pd.DataFrame) -> pd.DataFrame:
     return build_column_export(
         df,
         [
-            ("Person ID", VIASPORT_PERSON_ID_CANDIDATES),
+            ("Nomination ID", VIASPORT_NOMINATION_ID_CANDIDATES),
             ("Sport", VIASPORT_SPORT_CANDIDATES),
             ("Card level", VIASPORT_CARD_LEVEL_CANDIDATES),
             ("Gender", VIASPORT_GENDER_CANDIDATES),
@@ -683,7 +684,7 @@ def build_viasport_coaches_export(df: pd.DataFrame) -> pd.DataFrame:
     return build_column_export(
         df,
         [
-            ("Person ID", VIASPORT_PERSON_ID_CANDIDATES),
+            ("Nomination ID", VIASPORT_NOMINATION_ID_CANDIDATES),
             ("Sport", VIASPORT_SPORT_CANDIDATES),
             ("Gender", VIASPORT_GENDER_CANDIDATES),
             ("Current City Campus", VIASPORT_CURRENT_CAMPUS_CANDIDATES),
