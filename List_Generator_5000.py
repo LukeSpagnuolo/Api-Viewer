@@ -559,6 +559,188 @@ def build_default_enhanced_excellence_sports(unique_sport_options: list) -> list
     return defaults
 
 
+VIASPORT_FIXED_FISCAL_YEAR = "2025-2026"
+VIASPORT_TRUE_VALUES = {"true", "1", "yes", "y"}
+VIASPORT_PERSON_ID_CANDIDATES = ["person_id", "profile_id", "id", "person.id", "profile.id"]
+VIASPORT_FIRST_NAME_CANDIDATES = ["first_name", "person.first_name", "First Name"]
+VIASPORT_LAST_NAME_CANDIDATES = ["last_name", "person.last_name", "Last Name"]
+VIASPORT_SPORT_CANDIDATES = ["sport", "nomination_sport_name", "Sport", "Nomination Sport Name"]
+VIASPORT_GENDER_CANDIDATES = ["gender", "Gender"]
+VIASPORT_CARD_LEVEL_CANDIDATES = ["athlete_carding", "card_level", "Card level", "Card Level"]
+VIASPORT_AGE_CANDIDATES = ["age", "Age"]
+VIASPORT_DISCIPLINE_CANDIDATES = ["discipline", "Discipline"]
+VIASPORT_ETHNICITY_CANDIDATES = ["athlete_ethnicity", "ethnicity", "Ethnicity"]
+VIASPORT_CURRENT_CAMPUS_CANDIDATES = ["current_city_campus", "residence_city_campus", "current_campus", "campus_label"]
+VIASPORT_NOMINATION_CLAIMED_CANDIDATES = ["nomination_claimed", "current_nomination.redeemed", "Nomination Claimed"]
+VIASPORT_APPROVED_CANDIDATES = ["nomination_approved", "current_nomination.approved"]
+
+
+def first_existing_column(df: pd.DataFrame, candidates: list) -> str:
+    """Return the first column name from candidates that exists in the DataFrame."""
+    return next((c for c in candidates if c in df.columns), "")
+
+
+def normalized_text_series(series: pd.Series) -> pd.Series:
+    """Normalize text values for stable equality filtering."""
+    return series.fillna("").astype(str).map(normalize_sport_name)
+
+
+def truthy_mask(series: pd.Series) -> pd.Series:
+    """Return a boolean mask for common true-like string values."""
+    return series.fillna("").astype(str).str.strip().str.lower().isin(VIASPORT_TRUE_VALUES)
+
+
+def filter_viasport_base(df: pd.DataFrame, role_value: str, level_category_value: str = "") -> pd.DataFrame:
+    """Apply the fixed ViaSport report filters that all prebuilt exports share."""
+    if df.empty:
+        return df
+
+    out = apply_fiscal_year_filter(df.copy(), VIASPORT_FIXED_FISCAL_YEAR)
+    out = remove_test_sports(out)
+    if out.empty:
+        return out
+
+    role_col = first_existing_column(out, ["role", "Role"])
+    if not role_col:
+        return out.iloc[0:0]
+    out = out[normalized_text_series(out[role_col]) == normalize_sport_name(role_value)]
+
+    approved_col = first_existing_column(out, VIASPORT_APPROVED_CANDIDATES)
+    if not approved_col:
+        return out.iloc[0:0]
+    out = out[truthy_mask(out[approved_col])]
+
+    if level_category_value:
+        out = add_level_category(out)
+        level_col = first_existing_column(out, ["level_category", "Level Category"])
+        if not level_col:
+            return out.iloc[0:0]
+        out = out[normalized_text_series(out[level_col]) == normalize_sport_name(level_category_value)]
+
+    return out
+
+
+def build_column_export(df: pd.DataFrame, specs: list) -> pd.DataFrame:
+    """Build a DataFrame using ordered output labels and source column fallbacks."""
+    out = pd.DataFrame(index=df.index)
+    for output_label, candidates in specs:
+        actual = first_existing_column(df, candidates)
+        if actual:
+            out[output_label] = df[actual]
+        else:
+            out[output_label] = ""
+    return out
+
+
+def build_viasport_sc_carded_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Build the SC Carded list export."""
+    out = build_column_export(
+        df,
+        [
+            ("Sport", VIASPORT_SPORT_CANDIDATES),
+            ("Gender", VIASPORT_GENDER_CANDIDATES),
+            ("Card level", VIASPORT_CARD_LEVEL_CANDIDATES),
+            ("Nomination Claimed", VIASPORT_NOMINATION_CLAIMED_CANDIDATES),
+        ],
+    )
+
+    first_name_col = first_existing_column(df, VIASPORT_FIRST_NAME_CANDIDATES)
+    last_name_col = first_existing_column(df, VIASPORT_LAST_NAME_CANDIDATES)
+    first_name = df[first_name_col].fillna("").astype(str) if first_name_col else pd.Series("", index=df.index)
+    last_name = df[last_name_col].fillna("").astype(str) if last_name_col else pd.Series("", index=df.index)
+    out.insert(1, "Name", (first_name.str.strip() + " " + last_name.str.strip()).str.strip())
+
+    province = pd.Series("", index=df.index, dtype="object")
+    current_campus_col = first_existing_column(df, VIASPORT_CURRENT_CAMPUS_CANDIDATES)
+    if current_campus_col:
+        has_current_campus = df[current_campus_col].fillna("").astype(str).str.strip() != ""
+        province.loc[has_current_campus] = "British Columbia"
+    out.insert(4, "Province", province)
+
+    return out[["Sport", "Name", "Gender", "Card level", "Province", "Nomination Claimed"]]
+
+
+def build_viasport_high_performance_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Build the High Performance Athletes list export."""
+    return build_column_export(
+        df,
+        [
+            ("Person ID", VIASPORT_PERSON_ID_CANDIDATES),
+            ("Sport", VIASPORT_SPORT_CANDIDATES),
+            ("Card level", VIASPORT_CARD_LEVEL_CANDIDATES),
+            ("Gender", VIASPORT_GENDER_CANDIDATES),
+            ("Age", VIASPORT_AGE_CANDIDATES),
+            ("Discipline", VIASPORT_DISCIPLINE_CANDIDATES),
+            ("Current City Campus", VIASPORT_CURRENT_CAMPUS_CANDIDATES),
+            ("Ethnicity", VIASPORT_ETHNICITY_CANDIDATES),
+            ("Nomination Claimed", VIASPORT_NOMINATION_CLAIMED_CANDIDATES),
+        ],
+    )
+
+
+def build_viasport_coaches_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Build the Coaches list export."""
+    return build_column_export(
+        df,
+        [
+            ("Person ID", VIASPORT_PERSON_ID_CANDIDATES),
+            ("Sport", VIASPORT_SPORT_CANDIDATES),
+            ("Gender", VIASPORT_GENDER_CANDIDATES),
+            ("Current City Campus", VIASPORT_CURRENT_CAMPUS_CANDIDATES),
+            ("Nomination Claimed", VIASPORT_NOMINATION_CLAIMED_CANDIDATES),
+        ],
+    )
+
+
+def build_viasport_report_bundle(df: pd.DataFrame) -> dict:
+    """Build all ViaSport report exports from the same filtered base DataFrame."""
+    return {
+        "sc_carded_list": build_viasport_sc_carded_export(df),
+        "high_performance_athletes": build_viasport_high_performance_export(df),
+        "coaches": build_viasport_coaches_export(df),
+    }
+
+
+def filter_by_selected_sports(df: pd.DataFrame, selected_sports: list) -> pd.DataFrame:
+    """Keep rows where any available sport column matches selected sport values."""
+    if df.empty or not selected_sports:
+        return df
+
+    cols = get_available_sport_columns(df)
+    if not cols:
+        return df
+
+    selected_norms = {
+        normalize_sport_name(s)
+        for s in selected_sports
+        if normalize_sport_name(s)
+    }
+    if not selected_norms:
+        return df
+
+    keep = pd.Series(False, index=df.index)
+    for col in cols:
+        norm_col = df[col].fillna("").astype(str).map(normalize_sport_name)
+        keep = keep | norm_col.isin(selected_norms)
+
+    return df[keep]
+
+
+def build_prebuilt_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Order and relabel columns for prebuilt list exports."""
+    if df.empty:
+        return df
+
+    ordered_fields = [field for field, _ in ACTIVE_EXPORT_COLUMNS if field in df.columns]
+    extra_fields = [c for c in df.columns if c not in ordered_fields]
+    fields = ordered_fields + extra_fields
+
+    df_export = df[fields].copy()
+    rename_map = {f: ACTIVE_FIELD_TO_LABEL.get(f, f) for f in fields}
+    df_export.rename(columns=rename_map, inplace=True)
+    return df_export
+
+
 def remove_test_sports(df: pd.DataFrame) -> pd.DataFrame:
     """
     Remove rows where any of the sport columns indicate TEST sports.
@@ -966,6 +1148,28 @@ def build_report_guide_tab() -> html.Div:
 - Keeps only rows where `nomination_claimed` is true.
 - Removes internal IDs and other excluded keys.
 - Exports the configured active-athlete column set plus any remaining non-excluded fields.
+
+### ViaSport reporting prebuilt lists
+
+- These reports always use fiscal year `2025-2026`.
+- They require `role` and `nomination_approved` to match the report rules below.
+- The SC Carded list fills `Province` with `British Columbia` for rows that have a current city campus value.
+- The combined download bundles the individual report CSVs into a single ZIP.
+
+#### SC Carded list (2A)
+
+- Filters to `role = athlete`, `nomination_approved = true`, and `level_category = Canadian Elite`.
+- Exports `Sport`, `Name`, `Gender`, `Card level`, `Province`, and `Nomination Claimed`.
+
+#### High Performance Athletes (2B)
+
+- Filters to `role = athlete`, `nomination_approved = true`, and `level_category = Provincial Development`.
+- Exports `Person ID`, `Sport`, `Card level`, `Gender`, `Age`, `Discipline`, `Current City Campus`, `Ethnicity`, and `Nomination Claimed`.
+
+#### Coaches (4B)
+
+- Filters to `role = Coach` and `nomination_approved = true`.
+- Exports `Person ID`, `Sport`, `Gender`, `Current City Campus`, and `Nomination Claimed`.
 """
 
     return html.Div(
@@ -1393,6 +1597,122 @@ app.layout = html.Div(
                     },
                 ),
 
+                # ── ViaSport Sport Selectors ────────────────────────────────────
+                html.H4(
+                    "ViaSport sport selectors",
+                    style={"marginBottom": "0.4rem", "fontSize": "1.05rem", "color": "#003366"},
+                ),
+                html.Div(
+                    [
+                        html.Button(
+                            "Download ViaSport LOU List",
+                            id="btn-dl-viasport-lou",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "backgroundColor": "#7b1e3a",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Button(
+                            "Download ViaSport Enhanced Excellence List",
+                            id="btn-dl-viasport-enhanced-excellence",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "marginLeft": "0.8rem",
+                                "backgroundColor": "#005f73",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                    ],
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "flexWrap": "wrap",
+                        "rowGap": "0.6rem",
+                        "marginBottom": "1rem",
+                    },
+                ),
+
+                # ── ViaSport Reporting Prebuilt Lists ───────────────────────────
+                html.H4(
+                    "ViaSport reporting prebuilt lists",
+                    style={"marginBottom": "0.4rem", "fontSize": "1.05rem", "color": "#003366"},
+                ),
+                html.Div(
+                    [
+                        html.Button(
+                            "Download SC Carded List (2A)",
+                            id="btn-dl-viasport-sc-carded",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "backgroundColor": "#7b1e3a",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Button(
+                            "Download High Performance Athletes (2B)",
+                            id="btn-dl-viasport-high-performance",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "marginLeft": "0.8rem",
+                                "backgroundColor": "#005f73",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Button(
+                            "Download Coaches (4B)",
+                            id="btn-dl-viasport-coaches",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "marginLeft": "0.8rem",
+                                "backgroundColor": "#2e7d32",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Button(
+                            "Download All ViaSport Reports",
+                            id="btn-dl-viasport-all",
+                            n_clicks=0,
+                            disabled=True,
+                            style={
+                                "padding": "0.45rem 1.2rem",
+                                "marginLeft": "0.8rem",
+                                "backgroundColor": "#0a4f7a",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                    ],
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "flexWrap": "wrap",
+                        "rowGap": "0.6rem",
+                        "marginBottom": "1rem",
+                    },
+                ),
+
                 # Collapsible technical log at the very bottom
                 html.Details(
                     [
@@ -1431,6 +1751,12 @@ app.layout = html.Div(
                 dcc.Download(id="csv-file-mailmerge"),
                 dcc.Download(id="csv-file-national-inventory"),
                 dcc.Download(id="csv-file-active-athletes"),
+                dcc.Download(id="csv-file-viasport-lou"),
+                dcc.Download(id="csv-file-viasport-enhanced-excellence"),
+                dcc.Download(id="csv-file-viasport-sc-carded"),
+                dcc.Download(id="csv-file-viasport-high-performance"),
+                dcc.Download(id="csv-file-viasport-coaches"),
+                dcc.Download(id="csv-file-viasport-all"),
             ],
         ),
         html.Div(id="guide-tab-content", children=build_report_guide_tab(), style={"display": "none"}),
@@ -1490,6 +1816,12 @@ def fetch_columns_callback(_):
     Output("btn-dl-mailmerge", "disabled"),
     Output("btn-dl-national-inventory", "disabled"),
     Output("btn-dl-active-athletes", "disabled"),
+    Output("btn-dl-viasport-lou", "disabled"),
+    Output("btn-dl-viasport-enhanced-excellence", "disabled"),
+    Output("btn-dl-viasport-sc-carded", "disabled"),
+    Output("btn-dl-viasport-high-performance", "disabled"),
+    Output("btn-dl-viasport-coaches", "disabled"),
+    Output("btn-dl-viasport-all", "disabled"),
     Output("log", "children"),
     Output("loading-message", "children"),
     Output("column-select", "options"),
@@ -1515,13 +1847,7 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
         return (
             no_update,
             no_update,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
+            *([True] * 13),
             "No OAuth token – log in.",
             "",
             no_update,
@@ -1583,13 +1909,7 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
         return (
             [],
             [],
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
-            True,
+            *([True] * 13),
             "\n".join(log_lines),
             "No profiles found.",
             no_update,
@@ -1654,13 +1974,7 @@ def fetch_profiles(_, fetch_col_val, col_defs_data):
     return (
         df.to_dict("records"),
         columns,
-        False,
-        False,
-        False,
-        False,
-        False,
-        False,
-        False,
+        *([False] * 13),
         "\n".join(log_lines),
         loading_msg,
         col_options,
@@ -2162,6 +2476,142 @@ def download_active_athletes(_, fiscal_year_val):
 
     filename = cached_name.replace(".csv", "_active_athletes.csv")
     return dcc.send_data_frame(df_export.to_csv, filename, index=False)
+
+
+@app.callback(
+    Output("csv-file-viasport-lou", "data"),
+    Input("btn-dl-viasport-lou", "n_clicks"),
+    State("fiscal-year-dd", "value"),
+    State("lou-sports-dd", "value"),
+    prevent_initial_call=True,
+)
+def download_viasport_lou(_, fiscal_year_val, lou_sports):
+    if cached_df.empty:
+        return no_update
+
+    df_out = cached_df.copy()
+    df_out = apply_fiscal_year_filter(df_out, fiscal_year_val)
+    df_out = remove_test_sports(df_out)
+    df_out = filter_by_selected_sports(df_out, lou_sports)
+    df_out = add_level_category(df_out)
+
+    if df_out.empty:
+        return no_update
+
+    df_export = build_prebuilt_export_df(df_out)
+    filename = cached_name.replace(".csv", "_viasport_lou_list.csv")
+    return dcc.send_data_frame(df_export.to_csv, filename, index=False)
+
+
+@app.callback(
+    Output("csv-file-viasport-enhanced-excellence", "data"),
+    Input("btn-dl-viasport-enhanced-excellence", "n_clicks"),
+    State("fiscal-year-dd", "value"),
+    State("enhanced-excellence-sports-dd", "value"),
+    prevent_initial_call=True,
+)
+def download_viasport_enhanced_excellence(_, fiscal_year_val, enhanced_excellence_sports):
+    if cached_df.empty:
+        return no_update
+
+    df_out = cached_df.copy()
+    df_out = apply_fiscal_year_filter(df_out, fiscal_year_val)
+    df_out = remove_test_sports(df_out)
+    df_out = filter_by_selected_sports(df_out, enhanced_excellence_sports)
+    df_out = add_level_category(df_out)
+
+    if df_out.empty:
+        return no_update
+
+    df_export = build_prebuilt_export_df(df_out)
+    filename = cached_name.replace(".csv", "_viasport_enhanced_excellence_list.csv")
+    return dcc.send_data_frame(df_export.to_csv, filename, index=False)
+
+
+@app.callback(
+    Output("csv-file-viasport-sc-carded", "data"),
+    Input("btn-dl-viasport-sc-carded", "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_viasport_sc_carded(_):
+    if cached_df.empty:
+        return no_update
+
+    df_out = filter_viasport_base(cached_df, "athlete", "Canadian Elite")
+    if df_out.empty:
+        return no_update
+
+    df_export = build_viasport_sc_carded_export(df_out)
+    filename = cached_name.replace(".csv", "_viasport_sc_carded_list.csv")
+    return dcc.send_data_frame(df_export.to_csv, filename, index=False)
+
+
+@app.callback(
+    Output("csv-file-viasport-high-performance", "data"),
+    Input("btn-dl-viasport-high-performance", "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_viasport_high_performance(_):
+    if cached_df.empty:
+        return no_update
+
+    df_out = filter_viasport_base(cached_df, "athlete", "Provincial Development")
+    if df_out.empty:
+        return no_update
+
+    df_export = build_viasport_high_performance_export(df_out)
+    filename = cached_name.replace(".csv", "_viasport_high_performance_athletes.csv")
+    return dcc.send_data_frame(df_export.to_csv, filename, index=False)
+
+
+@app.callback(
+    Output("csv-file-viasport-coaches", "data"),
+    Input("btn-dl-viasport-coaches", "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_viasport_coaches(_):
+    if cached_df.empty:
+        return no_update
+
+    df_out = filter_viasport_base(cached_df, "coach")
+    if df_out.empty:
+        return no_update
+
+    df_export = build_viasport_coaches_export(df_out)
+    filename = cached_name.replace(".csv", "_viasport_coaches.csv")
+    return dcc.send_data_frame(df_export.to_csv, filename, index=False)
+
+
+@app.callback(
+    Output("csv-file-viasport-all", "data"),
+    Input("btn-dl-viasport-all", "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_viasport_all(_):
+    if cached_df.empty:
+        return no_update
+
+    bundles = {
+        "sc_carded_list": filter_viasport_base(cached_df, "athlete", "Canadian Elite"),
+        "high_performance_athletes": filter_viasport_base(cached_df, "athlete", "Provincial Development"),
+        "coaches": filter_viasport_base(cached_df, "coach"),
+    }
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for key, report_df in bundles.items():
+            if key == "sc_carded_list":
+                export_df = build_viasport_sc_carded_export(report_df)
+            elif key == "high_performance_athletes":
+                export_df = build_viasport_high_performance_export(report_df)
+            else:
+                export_df = build_viasport_coaches_export(report_df)
+            zf.writestr(
+                f"{cached_name.replace('.csv', '')}_viasport_{key}.csv",
+                export_df.to_csv(index=False).encode("utf-8"),
+            )
+    zip_buffer.seek(0)
+    return dcc.send_bytes(zip_buffer.read(), cached_name.replace(".csv", "_viasport_reports.zip"))
 
 
 # -------------------------------------------------------------------------
